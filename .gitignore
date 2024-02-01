@@ -1,0 +1,9 @@
+.env
+project.xcworkspace/
+xcuserdata/
+.vscode/
+.VSCodeCounter/
+build/
+tmp/
+Cargo.lock
+target/
