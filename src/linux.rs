@@ -52,7 +52,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<()> {
 }
 
 pub fn tproxy_remove(tproxy_args: &TproxyArgs) -> std::io::Result<()> {
-    // sudo route del bypass_ip
+    // sudo ip route del bypass_ip
     for bypass_ip in tproxy_args.bypass_ips.iter() {
         let args = &["route", "del", &bypass_ip.to_string()];
         if let Err(_err) = run_command("ip", args) {
