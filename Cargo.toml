@@ -12,6 +12,7 @@ keywords = ["tun", "network", "tunnel", "transparent", "proxy"]
 log = ["dep:log"]
 
 [dependencies]
+cidr = "0.2.2"
 log = { version = "0.4", optional = true }
 regex = "1.10"
 serde = { version = "1.0", features = ["derive"] }
