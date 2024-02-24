@@ -1,6 +1,6 @@
 [package]
 name = "tproxy-config"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Transparent proxy configuration"
 license = "MIT"
