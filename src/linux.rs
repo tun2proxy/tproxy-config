@@ -34,10 +34,7 @@ fn create_cidr(addr: IpAddr, len: u8) -> std::io::Result<IpCidr> {
 }
 
 fn bypass_ip(ip: &IpAddr) -> std::io::Result<bool> {
-    let is_ipv6 = match ip {
-        IpAddr::V4(_) => false,
-        IpAddr::V6(_) => true,
-    };
+    let is_ipv6 = ip.is_ipv6();
     let route_show_args = if is_ipv6 {
         ["-6", "route", "show"]
     } else {
@@ -73,7 +70,7 @@ fn bypass_ip(ip: &IpAddr) -> std::io::Result<bool> {
             Some((addr_str, prefix_len_str)) => (addr_str, prefix_len_str),
         };
 
-        let cidr: IpCidr = create_cidr(IpAddr::from_str(addr_str).unwrap().into(), u8::from_str(prefix_len_str).unwrap())?;
+        let cidr: IpCidr = create_cidr(IpAddr::from_str(addr_str).unwrap(), u8::from_str(prefix_len_str).unwrap())?;
         let route_components: Vec<String> = split.map(String::from).collect();
         route_info.push((cidr, route_components))
     }
