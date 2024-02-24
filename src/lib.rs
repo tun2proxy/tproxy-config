@@ -24,7 +24,7 @@ pub const TUN_NAME: &str = if cfg!(target_os = "linux") {
 } else if cfg!(target_os = "windows") {
     "wintun"
 } else if cfg!(target_os = "macos") {
-    "utun3"
+    "utun5"
 } else {
     // panic!("Unsupported OS")
     "unknown-tun"
