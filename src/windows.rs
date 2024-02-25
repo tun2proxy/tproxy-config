@@ -34,7 +34,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> 
     }
 
     let restore = TproxyRestore {
-        tproxy_args: tproxy_args.clone(),
+        tproxy_args: Some(tproxy_args.clone()),
         gateway: Some(original_gateway),
         ..TproxyRestore::default()
     };

@@ -69,10 +69,11 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> 
     writeln!(writer, "nameserver {}\n", tun_gateway)?;
 
     let restore = TproxyRestore {
-        tproxy_args: tproxy_args.clone(),
+        tproxy_args: Some(tproxy_args.clone()),
         dns_servers: Some(dns_servers),
         gateway: Some(original_gateway_0),
         gw_scope: Some(orig_gw_iface),
+        ..TproxyRestore::default()
     };
     crate::store_restore_state(&restore)?;
 
