@@ -49,7 +49,8 @@ pub fn tproxy_remove(tproxy_restore: Option<TproxyRestore>) -> std::io::Result<(
         None => crate::retrieve_restore_state()?,
     };
 
-    let tproxy_args = &state.tproxy_args;
+    let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
+    let tproxy_args = state.tproxy_args.as_ref().ok_or(err)?;
 
     let err = std::io::Error::new(std::io::ErrorKind::Other, "No default gateway found");
     let original_gateway = state.gateway.take().ok_or(err)?;
