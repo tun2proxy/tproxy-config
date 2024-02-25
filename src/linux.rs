@@ -190,4 +190,11 @@ mod tests {
         let (addr, iface) = get_default_gateway().unwrap();
         println!("addr: {:?}, iface: {}", addr, iface);
     }
+
+    #[test]
+    fn test_bypass_ip() {
+        let ip = "123.45.67.89".parse().unwrap();
+        let res = bypass_ip(&ip);
+        println!("bypass_ip: {:?}", res);
+    }
 }
