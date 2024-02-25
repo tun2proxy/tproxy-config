@@ -1,9 +1,14 @@
 #![cfg(target_os = "linux")]
 
-use crate::{run_command, TproxyArgs, ETC_RESOLV_CONF_FILE};
-use cidr::IpCidr;
+use std::fs::Permissions;
 use std::net::IpAddr;
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::PermissionsExt;
 use std::str::FromStr;
+
+use cidr::IpCidr;
+
+use crate::{run_command, TproxyArgs};
 
 fn bytes_to_lines(bytes: Vec<u8>) -> std::io::Result<Vec<String>> {
     // Convert bytes to string
@@ -31,6 +36,70 @@ fn create_cidr(addr: IpAddr, len: u8) -> std::io::Result<IpCidr> {
             format!("failed to convert {}/{} to CIDR", addr, len),
         )),
     }
+}
+
+fn write_buffer_to_fd(fd: RawFd, data: &[u8]) -> std::io::Result<()> {
+    let mut written = 0;
+    loop {
+        if written >= data.len() {
+            break;
+        }
+        written += nix::unistd::write(fd, &data[written..])?;
+    }
+    Ok(())
+}
+
+fn write_nameserver(fd: RawFd) -> std::io::Result<()> {
+    let data = "nameserver 198.18.0.1\n".as_bytes();
+    nix::sys::stat::fchmod(fd, nix::sys::stat::Mode::from_bits(0o444).unwrap())?;
+    write_buffer_to_fd(fd, data)?;
+    Ok(())
+}
+
+fn setup_resolv_conf() -> std::io::Result<()> {
+    // We use a mount here because software like NetworkManager is known to fiddle with the
+    // resolv.conf file and restore it to its original state.
+    // Example: https://stackoverflow.com/q/51784208
+    // Using a readonly bind mount, we can pin our configuration without having the user update
+    // the NetworkManager configuration.
+    let file = tempfile::Builder::new()
+        .permissions(Permissions::from_mode(0o644))
+        .rand_bytes(32)
+        .tempfile()?;
+    let mut fd = file.as_raw_fd();
+    write_nameserver(fd)?;
+    let source = format!("/proc/self/fd/{}", fd);
+    if (Ok(()), Ok(()))
+        != (
+            nix::mount::mount(
+                source.as_str().into(),
+                "/etc/resolv.conf",
+                "".into(),
+                nix::mount::MsFlags::MS_BIND,
+                "".into(),
+            ),
+            nix::mount::mount(
+                "".into(),
+                "/etc/resolv.conf",
+                "".into(),
+                nix::mount::MsFlags::MS_REMOUNT | nix::mount::MsFlags::MS_RDONLY | nix::mount::MsFlags::MS_BIND,
+                "".into(),
+            ),
+        )
+    {
+        #[cfg(feature = "log")]
+        log::warn!("failed to bind mount custom resolv.conf onto /etc/resolv.conf, resorting to direct write");
+        nix::unistd::close(fd)?;
+
+        fd = nix::fcntl::open(
+            "/etc/resolv.conf",
+            nix::fcntl::OFlag::O_WRONLY | nix::fcntl::OFlag::O_CLOEXEC | nix::fcntl::OFlag::O_TRUNC,
+            nix::sys::stat::Mode::from_bits(0o644).unwrap(),
+        )?;
+        write_nameserver(fd)?;
+        nix::unistd::close(fd)?;
+    }
+    Ok(())
 }
 
 fn bypass_ip(ip: &IpAddr) -> std::io::Result<bool> {
@@ -129,11 +198,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<()> {
     let args = &["route", "add", "8000::/1", "dev", tun_name];
     run_command("ip", args)?;
 
-    // sudo sh -c "echo nameserver 10.0.0.1 > /etc/resolv.conf"
-    let file = std::fs::OpenOptions::new().write(true).truncate(true).open(ETC_RESOLV_CONF_FILE)?;
-    let mut writer = std::io::BufWriter::new(file);
-    use std::io::Write;
-    writeln!(writer, "nameserver {}", tproxy_args.tun_gateway)?;
+    setup_resolv_conf()?;
 
     Ok(())
 }
