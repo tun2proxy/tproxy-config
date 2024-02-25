@@ -182,7 +182,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> 
     let tun_name = &tproxy_args.tun_name;
 
     let mut restore = TproxyRestore {
-        tproxy_args: tproxy_args.clone(),
+        tproxy_args: Some(tproxy_args.clone()),
         ..Default::default()
     };
 
@@ -213,11 +213,17 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> 
 
     setup_resolv_conf(&mut restore)?;
 
+    crate::store_restore_state(&restore)?;
     Ok(restore)
 }
 
-pub fn tproxy_remove(tproxy_restore: &TproxyRestore) -> std::io::Result<()> {
-    let tproxy_args = &tproxy_restore.tproxy_args;
+pub fn tproxy_remove(tproxy_restore: Option<TproxyRestore>) -> std::io::Result<()> {
+    let tproxy_restore = match tproxy_restore {
+        Some(restore) => restore,
+        None => crate::retrieve_restore_state()?,
+    };
+    let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
+    let tproxy_args = tproxy_restore.tproxy_args.as_ref().ok_or(err)?;
     // sudo ip route del bypass_ip
     for bypass_ip in tproxy_args.bypass_ips.iter() {
         let args = &["route", "del", &bypass_ip.to_string()];

@@ -60,16 +60,11 @@ pub(crate) fn get_state_file_path() -> PathBuf {
 #[allow(dead_code)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default)]
 pub struct TproxyRestore {
-    tproxy_args: TproxyArgs,
-    #[cfg(not(target_os = "linux"))]
+    pub(crate) tproxy_args: Option<TproxyArgs>,
     pub(crate) dns_servers: Option<Vec<IpAddr>>,
-    #[cfg(not(target_os = "linux"))]
     pub(crate) gateway: Option<IpAddr>,
-    #[cfg(not(target_os = "linux"))]
     pub(crate) gw_scope: Option<String>,
-    #[cfg(target_os = "linux")]
     pub(crate) umount_resolvconf: bool,
-    #[cfg(target_os = "linux")]
     pub(crate) restore_resolvconf_content: Option<Vec<u8>>,
 }
 

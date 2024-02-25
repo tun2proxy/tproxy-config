@@ -34,7 +34,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> 
     }
 
     let restore = TproxyRestore {
-        tproxy_args: tproxy_args.clone(),
+        tproxy_args: Some(tproxy_args.clone()),
         gateway: Some(original_gateway),
         ..TproxyRestore::default()
     };
@@ -43,9 +43,14 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> 
     Ok(restore)
 }
 
-pub fn tproxy_remove(_: &TproxyRestore) -> std::io::Result<()> {
-    let mut state = crate::retrieve_restore_state()?;
-    let tproxy_args = &state.tproxy_args;
+pub fn tproxy_remove(tproxy_restore: Option<TproxyRestore>) -> std::io::Result<()> {
+    let mut state = match tproxy_restore {
+        Some(restore) => restore,
+        None => crate::retrieve_restore_state()?,
+    };
+
+    let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
+    let tproxy_args = state.tproxy_args.as_ref().ok_or(err)?;
 
     let err = std::io::Error::new(std::io::ErrorKind::Other, "No default gateway found");
     let original_gateway = state.gateway.take().ok_or(err)?;
