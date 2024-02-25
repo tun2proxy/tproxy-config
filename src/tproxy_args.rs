@@ -2,7 +2,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use crate::{PROXY_ADDR, TUN_DNS, TUN_GATEWAY, TUN_IPV4, TUN_MTU, TUN_NAME, TUN_NETMASK};
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct TproxyArgs {
     pub tun_ip: IpAddr,
     pub tun_netmask: IpAddr,

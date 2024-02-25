@@ -1,12 +1,12 @@
 #![cfg(target_os = "macos")]
 
-use crate::{is_private_ip, run_command, IntermediateState, TproxyArgs, ETC_RESOLV_CONF_FILE};
+use crate::{is_private_ip, run_command, TproxyArgs, TproxyRestore, ETC_RESOLV_CONF_FILE};
 use std::{
     net::{IpAddr, SocketAddr},
     str::FromStr,
 };
 
-pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<()> {
+pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> {
     // 0. Save the original gateway and scope
     let (original_gateway_0, orig_gw_iface) = get_default_gateway()?;
     let original_gateway = original_gateway_0.to_string();
@@ -68,18 +68,19 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<()> {
     use std::io::Write;
     writeln!(writer, "nameserver {}\n", tun_gateway)?;
 
-    let disk_record = IntermediateState {
+    let restore = TproxyRestore {
+        tproxy_args: tproxy_args.clone(),
         dns_servers: Some(dns_servers),
         gateway: Some(original_gateway_0),
         gw_scope: Some(orig_gw_iface),
     };
-    crate::store_intermediate_state(&disk_record)?;
+    crate::store_restore_state(&restore)?;
 
-    Ok(())
+    Ok(restore)
 }
 
-pub fn tproxy_remove(_tproxy_args: &TproxyArgs) -> std::io::Result<()> {
-    let mut state = crate::retrieve_intermediate_state()?;
+pub fn tproxy_remove(_: &TproxyRestore) -> std::io::Result<()> {
+    let mut state = crate::retrieve_restore_state()?;
 
     let original_dns_servers = state.dns_servers.take().unwrap_or_default();
 

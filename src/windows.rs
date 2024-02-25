@@ -1,9 +1,9 @@
 #![cfg(target_os = "windows")]
 
-use crate::{run_command, IntermediateState, TproxyArgs};
+use crate::{run_command, TproxyArgs, TproxyRestore};
 use std::net::{IpAddr, Ipv4Addr};
 
-pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<()> {
+pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> {
     // 1. Setup the adapter's DNS
     // command: `netsh interface ip set dns "utun3" static 8.8.8.8`
     let dns_addr = tproxy_args.tun_dns;
@@ -33,17 +33,19 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<()> {
         log::info!("route {:?}", args);
     }
 
-    let disk_record = IntermediateState {
+    let restore = TproxyRestore {
+        tproxy_args: tproxy_args.clone(),
         gateway: Some(original_gateway),
-        ..IntermediateState::default()
+        ..TproxyRestore::default()
     };
-    crate::store_intermediate_state(&disk_record)?;
+    crate::store_restore_state(&restore)?;
 
-    Ok(())
+    Ok(restore)
 }
 
-pub fn tproxy_remove(tproxy_args: &TproxyArgs) -> std::io::Result<()> {
-    let mut state = crate::retrieve_intermediate_state()?;
+pub fn tproxy_remove(_: &TproxyRestore) -> std::io::Result<()> {
+    let mut state = crate::retrieve_restore_state()?;
+    let tproxy_args = &state.tproxy_args;
 
     let err = std::io::Error::new(std::io::ErrorKind::Other, "No default gateway found");
     let original_gateway = state.gateway.take().ok_or(err)?;

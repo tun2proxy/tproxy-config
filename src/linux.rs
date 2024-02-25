@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 
+use std::fs;
 use std::fs::Permissions;
 use std::net::IpAddr;
 use std::os::fd::{AsRawFd, RawFd};
@@ -8,7 +9,7 @@ use std::str::FromStr;
 
 use cidr::IpCidr;
 
-use crate::{run_command, TproxyArgs};
+use crate::{run_command, TproxyArgs, TproxyRestore};
 
 fn bytes_to_lines(bytes: Vec<u8>) -> std::io::Result<Vec<String>> {
     // Convert bytes to string
@@ -56,7 +57,7 @@ fn write_nameserver(fd: RawFd) -> std::io::Result<()> {
     Ok(())
 }
 
-fn setup_resolv_conf() -> std::io::Result<()> {
+fn setup_resolv_conf(restore: &mut TproxyRestore) -> std::io::Result<()> {
     // We use a mount here because software like NetworkManager is known to fiddle with the
     // resolv.conf file and restore it to its original state.
     // Example: https://stackoverflow.com/q/51784208
@@ -69,27 +70,34 @@ fn setup_resolv_conf() -> std::io::Result<()> {
     let mut fd = file.as_raw_fd();
     write_nameserver(fd)?;
     let source = format!("/proc/self/fd/{}", fd);
-    if (Ok(()), Ok(()))
-        != (
-            nix::mount::mount(
-                source.as_str().into(),
-                "/etc/resolv.conf",
-                "".into(),
-                nix::mount::MsFlags::MS_BIND,
-                "".into(),
-            ),
-            nix::mount::mount(
-                "".into(),
-                "/etc/resolv.conf",
-                "".into(),
-                nix::mount::MsFlags::MS_REMOUNT | nix::mount::MsFlags::MS_RDONLY | nix::mount::MsFlags::MS_BIND,
-                "".into(),
-            ),
+    let mount1 = nix::mount::mount(
+        source.as_str().into(),
+        "/etc/resolv.conf",
+        "".into(),
+        nix::mount::MsFlags::MS_BIND,
+        "".into(),
+    );
+    if mount1.is_ok() {
+        restore.umount_resolvconf = true;
+        if nix::mount::mount(
+            "".into(),
+            "/etc/resolv.conf",
+            "".into(),
+            nix::mount::MsFlags::MS_REMOUNT | nix::mount::MsFlags::MS_RDONLY | nix::mount::MsFlags::MS_BIND,
+            "".into(),
         )
-    {
+        .is_err()
+        {
+            #[cfg(feature = "log")]
+            log::warn!("failed to remount /etc/resolv.conf as readonly");
+        }
+    }
+    if mount1.is_err() {
         #[cfg(feature = "log")]
         log::warn!("failed to bind mount custom resolv.conf onto /etc/resolv.conf, resorting to direct write");
         nix::unistd::close(fd)?;
+
+        restore.restore_resolvconf_content = Some(fs::read("/etc/resolv.conf")?);
 
         fd = nix::fcntl::open(
             "/etc/resolv.conf",
@@ -170,8 +178,13 @@ fn bypass_ip(ip: &IpAddr) -> std::io::Result<bool> {
     Ok(false)
 }
 
-pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<()> {
+pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> {
     let tun_name = &tproxy_args.tun_name;
+
+    let mut restore = TproxyRestore {
+        tproxy_args: tproxy_args.clone(),
+        ..Default::default()
+    };
 
     // sudo ip link set tun0 up
     let args = &["link", "set", tun_name, "up"];
@@ -198,12 +211,13 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<()> {
     let args = &["route", "add", "8000::/1", "dev", tun_name];
     run_command("ip", args)?;
 
-    setup_resolv_conf()?;
+    setup_resolv_conf(&mut restore)?;
 
-    Ok(())
+    Ok(restore)
 }
 
-pub fn tproxy_remove(tproxy_args: &TproxyArgs) -> std::io::Result<()> {
+pub fn tproxy_remove(tproxy_restore: &TproxyRestore) -> std::io::Result<()> {
+    let tproxy_args = &tproxy_restore.tproxy_args;
     // sudo ip route del bypass_ip
     for bypass_ip in tproxy_args.bypass_ips.iter() {
         let args = &["route", "del", &bypass_ip.to_string()];
@@ -220,11 +234,12 @@ pub fn tproxy_remove(tproxy_args: &TproxyArgs) -> std::io::Result<()> {
         log::debug!("command \"ip {:?}\" error: {}", args, _err);
     }
 
-    // sudo systemctl restart systemd-resolved.service
-    let args = &["restart", "systemd-resolved.service"];
-    if let Err(_err) = run_command("systemctl", args) {
-        #[cfg(feature = "log")]
-        log::debug!("command \"systemctl {:?}\" error: {}", args, _err);
+    if tproxy_restore.umount_resolvconf {
+        nix::mount::umount("/etc/resolv.conf")?;
+    }
+
+    if let Some(data) = &tproxy_restore.restore_resolvconf_content {
+        fs::write("/etc/resolv.conf", data)?;
     }
 
     Ok(())

@@ -54,30 +54,38 @@ pub(crate) fn run_command(command: &str, args: &[&str]) -> std::io::Result<Vec<u
 #[allow(dead_code)]
 pub(crate) fn get_state_file_path() -> PathBuf {
     let temp_dir = std::env::temp_dir();
-    temp_dir.join("tproxy_config_intermediate_state.json")
+    temp_dir.join("tproxy_config_restore_state.json")
 }
 
 #[allow(dead_code)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default)]
-pub(crate) struct IntermediateState {
+pub struct TproxyRestore {
+    tproxy_args: TproxyArgs,
+    #[cfg(not(target_os = "linux"))]
     pub(crate) dns_servers: Option<Vec<IpAddr>>,
+    #[cfg(not(target_os = "linux"))]
     pub(crate) gateway: Option<IpAddr>,
+    #[cfg(not(target_os = "linux"))]
     pub(crate) gw_scope: Option<String>,
+    #[cfg(target_os = "linux")]
+    pub(crate) umount_resolvconf: bool,
+    #[cfg(target_os = "linux")]
+    pub(crate) restore_resolvconf_content: Option<Vec<u8>>,
 }
 
 #[allow(dead_code)]
-pub(crate) fn store_intermediate_state(state: &IntermediateState) -> std::io::Result<()> {
+pub(crate) fn store_restore_state(state: &TproxyRestore) -> std::io::Result<()> {
     let contents = serde_json::to_string(&state)?;
     std::fs::write(crate::get_state_file_path(), contents)?;
     Ok(())
 }
 
 #[allow(dead_code)]
-pub(crate) fn retrieve_intermediate_state() -> std::io::Result<IntermediateState> {
+pub(crate) fn retrieve_restore_state() -> std::io::Result<TproxyRestore> {
     let path = crate::get_state_file_path();
     if !path.exists() {
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No state file found"));
     }
     let s = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str::<IntermediateState>(&s)?)
+    Ok(serde_json::from_str::<TproxyRestore>(&s)?)
 }
