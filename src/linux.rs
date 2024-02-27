@@ -67,27 +67,15 @@ fn setup_resolv_conf(restore: &mut TproxyRestore) -> std::io::Result<()> {
         .permissions(Permissions::from_mode(0o644))
         .rand_bytes(32)
         .tempfile()?;
-    let mut fd = file.as_raw_fd();
+    let fd = file.as_raw_fd();
     write_nameserver(fd)?;
     let source = format!("/proc/self/fd/{}", fd);
-    let mount1 = nix::mount::mount(
-        source.as_str().into(),
-        "/etc/resolv.conf",
-        "".into(),
-        nix::mount::MsFlags::MS_BIND,
-        "".into(),
-    );
+    let flags = nix::mount::MsFlags::MS_BIND;
+    let mount1 = nix::mount::mount(source.as_str().into(), "/etc/resolv.conf", "".into(), flags, "".into());
     if mount1.is_ok() {
         restore.umount_resolvconf = true;
-        if nix::mount::mount(
-            "".into(),
-            "/etc/resolv.conf",
-            "".into(),
-            nix::mount::MsFlags::MS_REMOUNT | nix::mount::MsFlags::MS_RDONLY | nix::mount::MsFlags::MS_BIND,
-            "".into(),
-        )
-        .is_err()
-        {
+        let flags = nix::mount::MsFlags::MS_REMOUNT | nix::mount::MsFlags::MS_RDONLY | nix::mount::MsFlags::MS_BIND;
+        if nix::mount::mount("".into(), "/etc/resolv.conf", "".into(), flags, "".into()).is_err() {
             #[cfg(feature = "log")]
             log::warn!("failed to remount /etc/resolv.conf as readonly");
         }
@@ -99,11 +87,8 @@ fn setup_resolv_conf(restore: &mut TproxyRestore) -> std::io::Result<()> {
 
         restore.restore_resolvconf_content = Some(fs::read("/etc/resolv.conf")?);
 
-        fd = nix::fcntl::open(
-            "/etc/resolv.conf",
-            nix::fcntl::OFlag::O_WRONLY | nix::fcntl::OFlag::O_CLOEXEC | nix::fcntl::OFlag::O_TRUNC,
-            nix::sys::stat::Mode::from_bits(0o644).unwrap(),
-        )?;
+        let flags = nix::fcntl::OFlag::O_WRONLY | nix::fcntl::OFlag::O_CLOEXEC | nix::fcntl::OFlag::O_TRUNC;
+        let fd = nix::fcntl::open("/etc/resolv.conf", flags, nix::sys::stat::Mode::from_bits(0o644).unwrap())?;
         write_nameserver(fd)?;
         nix::unistd::close(fd)?;
     }
@@ -193,7 +178,9 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> 
     for ip in tproxy_args.bypass_ips.iter() {
         bypass_ip(ip)?;
     }
-    bypass_ip(&tproxy_args.proxy_addr.ip())?;
+    if !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
+        bypass_ip(&tproxy_args.proxy_addr.ip())?;
+    }
 
     // sudo ip route add 128.0.0.0/1 dev tun0
     let args = &["route", "add", "128.0.0.0/1", "dev", tun_name];
