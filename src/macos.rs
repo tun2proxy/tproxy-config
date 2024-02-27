@@ -45,6 +45,11 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> 
         let args = &["add", &bypass_ip.to_string(), &original_gateway];
         run_command("route", args)?;
     }
+    if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
+        let bypass_ip = tproxy_args.proxy_addr.ip();
+        let args = &["add", &bypass_ip.to_string(), &original_gateway];
+        run_command("route", args)?;
+    }
 
     /*
     let unspecified = Ipv4Addr::UNSPECIFIED.to_string();

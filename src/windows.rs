@@ -24,13 +24,11 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> 
 
     let (original_gateway, _) = get_default_gateway()?;
 
-    // 3. route the bypass ip to the original gateway
-    // command: `route add bypass_ip original_gateway metric 1`
     for bypass_ip in tproxy_args.bypass_ips.iter() {
-        let args = &["add", &bypass_ip.to_string(), &original_gateway.to_string(), "metric", "1"];
-        run_command("route", args)?;
-        #[cfg(feature = "log")]
-        log::info!("route {:?}", args);
+        do_bypass_ip(*bypass_ip, original_gateway)?;
+    }
+    if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
+        do_bypass_ip(tproxy_args.proxy_addr.ip(), original_gateway)?;
     }
 
     let restore = TproxyRestore {
@@ -41,6 +39,16 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> 
     crate::store_restore_state(&restore)?;
 
     Ok(restore)
+}
+
+fn do_bypass_ip(bypass_ip: IpAddr, original_gateway: IpAddr) -> std::io::Result<()> {
+    // route the bypass ip to the original gateway
+    // command: `route add bypass_ip original_gateway metric 1`
+    let args = &["add", &bypass_ip.to_string(), &original_gateway.to_string(), "metric", "1"];
+    run_command("route", args)?;
+    #[cfg(feature = "log")]
+    log::info!("route {:?}", args);
+    Ok(())
 }
 
 pub fn tproxy_remove(tproxy_restore: Option<TproxyRestore>) -> std::io::Result<()> {
