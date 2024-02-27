@@ -3,13 +3,13 @@
 use std::fs;
 use std::fs::Permissions;
 use std::net::IpAddr;
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::str::FromStr;
 
 use cidr::IpCidr;
 
-use crate::{run_command, TproxyArgs, TproxyRestore};
+use crate::{run_command, TproxyArgs, TproxyRestore, ETC_RESOLV_CONF_FILE};
 
 fn bytes_to_lines(bytes: Vec<u8>) -> std::io::Result<Vec<String>> {
     // Convert bytes to string
@@ -39,7 +39,7 @@ fn create_cidr(addr: IpAddr, len: u8) -> std::io::Result<IpCidr> {
     }
 }
 
-fn write_buffer_to_fd(fd: RawFd, data: &[u8]) -> std::io::Result<()> {
+fn write_buffer_to_fd(fd: std::os::fd::BorrowedFd<'_>, data: &[u8]) -> std::io::Result<()> {
     let mut written = 0;
     loop {
         if written >= data.len() {
@@ -50,9 +50,9 @@ fn write_buffer_to_fd(fd: RawFd, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn write_nameserver(fd: RawFd) -> std::io::Result<()> {
+fn write_nameserver(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<()> {
     let data = "nameserver 198.18.0.1\n".as_bytes();
-    nix::sys::stat::fchmod(fd, nix::sys::stat::Mode::from_bits(0o444).unwrap())?;
+    nix::sys::stat::fchmod(fd.as_raw_fd(), nix::sys::stat::Mode::from_bits(0o444).unwrap())?;
     write_buffer_to_fd(fd, data)?;
     Ok(())
 }
@@ -67,30 +67,29 @@ fn setup_resolv_conf(restore: &mut TproxyRestore) -> std::io::Result<()> {
         .permissions(Permissions::from_mode(0o644))
         .rand_bytes(32)
         .tempfile()?;
-    let fd = file.as_raw_fd();
-    write_nameserver(fd)?;
-    let source = format!("/proc/self/fd/{}", fd);
+    write_nameserver(file.as_fd())?;
+    let source = format!("/proc/self/fd/{}", file.as_raw_fd());
     let flags = nix::mount::MsFlags::MS_BIND;
-    let mount1 = nix::mount::mount(source.as_str().into(), "/etc/resolv.conf", "".into(), flags, "".into());
+    let mount1 = nix::mount::mount(source.as_str().into(), ETC_RESOLV_CONF_FILE, "".into(), flags, "".into());
     if mount1.is_ok() {
         restore.umount_resolvconf = true;
         let flags = nix::mount::MsFlags::MS_REMOUNT | nix::mount::MsFlags::MS_RDONLY | nix::mount::MsFlags::MS_BIND;
-        if nix::mount::mount("".into(), "/etc/resolv.conf", "".into(), flags, "".into()).is_err() {
+        if nix::mount::mount("".into(), ETC_RESOLV_CONF_FILE, "".into(), flags, "".into()).is_err() {
             #[cfg(feature = "log")]
             log::warn!("failed to remount /etc/resolv.conf as readonly");
         }
     }
+    drop(file);
     if mount1.is_err() {
         #[cfg(feature = "log")]
         log::warn!("failed to bind mount custom resolv.conf onto /etc/resolv.conf, resorting to direct write");
-        nix::unistd::close(fd)?;
 
-        restore.restore_resolvconf_content = Some(fs::read("/etc/resolv.conf")?);
+        restore.restore_resolvconf_content = Some(fs::read(ETC_RESOLV_CONF_FILE)?);
 
         let flags = nix::fcntl::OFlag::O_WRONLY | nix::fcntl::OFlag::O_CLOEXEC | nix::fcntl::OFlag::O_TRUNC;
-        let fd = nix::fcntl::open("/etc/resolv.conf", flags, nix::sys::stat::Mode::from_bits(0o644).unwrap())?;
-        write_nameserver(fd)?;
-        nix::unistd::close(fd)?;
+        let fd = nix::fcntl::open(ETC_RESOLV_CONF_FILE, flags, nix::sys::stat::Mode::from_bits(0o644).unwrap())?;
+        let fd = unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fd) };
+        write_nameserver(fd.as_fd())?;
     }
     Ok(())
 }
@@ -228,11 +227,11 @@ pub fn tproxy_remove(tproxy_restore: Option<TproxyRestore>) -> std::io::Result<(
     }
 
     if tproxy_restore.umount_resolvconf {
-        nix::mount::umount("/etc/resolv.conf")?;
+        nix::mount::umount(ETC_RESOLV_CONF_FILE)?;
     }
 
     if let Some(data) = &tproxy_restore.restore_resolvconf_content {
-        fs::write("/etc/resolv.conf", data)?;
+        fs::write(ETC_RESOLV_CONF_FILE, data)?;
     }
 
     Ok(())
