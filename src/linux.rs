@@ -50,14 +50,19 @@ fn write_buffer_to_fd(fd: std::os::fd::BorrowedFd<'_>, data: &[u8]) -> std::io::
     Ok(())
 }
 
-fn write_nameserver(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<()> {
-    let data = "nameserver 198.18.0.1\n".as_bytes();
+fn write_nameserver(fd: std::os::fd::BorrowedFd<'_>, tun_gateway: Option<IpAddr>) -> std::io::Result<()> {
+    let tun_gateway = match tun_gateway {
+        Some(gw) => gw,
+        None => "198.18.0.1".parse().unwrap(),
+    };
+    let data = format!("nameserver {}\n", tun_gateway);
     nix::sys::stat::fchmod(fd.as_raw_fd(), nix::sys::stat::Mode::from_bits(0o444).unwrap())?;
-    write_buffer_to_fd(fd, data)?;
+    write_buffer_to_fd(fd, data.as_bytes())?;
     Ok(())
 }
 
 fn setup_resolv_conf(restore: &mut TproxyRestore) -> std::io::Result<()> {
+    let tun_gateway = restore.tproxy_args.as_ref().map(|args| args.tun_gateway);
     // We use a mount here because software like NetworkManager is known to fiddle with the
     // resolv.conf file and restore it to its original state.
     // Example: https://stackoverflow.com/q/51784208
@@ -67,7 +72,7 @@ fn setup_resolv_conf(restore: &mut TproxyRestore) -> std::io::Result<()> {
         .permissions(Permissions::from_mode(0o644))
         .rand_bytes(32)
         .tempfile()?;
-    write_nameserver(file.as_fd())?;
+    write_nameserver(file.as_fd(), tun_gateway)?;
     let source = format!("/proc/self/fd/{}", file.as_raw_fd());
     let flags = nix::mount::MsFlags::MS_BIND;
     let mount1 = nix::mount::mount(source.as_str().into(), ETC_RESOLV_CONF_FILE, "".into(), flags, "".into());
@@ -89,7 +94,7 @@ fn setup_resolv_conf(restore: &mut TproxyRestore) -> std::io::Result<()> {
         let flags = nix::fcntl::OFlag::O_WRONLY | nix::fcntl::OFlag::O_CLOEXEC | nix::fcntl::OFlag::O_TRUNC;
         let fd = nix::fcntl::open(ETC_RESOLV_CONF_FILE, flags, nix::sys::stat::Mode::from_bits(0o644).unwrap())?;
         let fd = unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fd) };
-        write_nameserver(fd.as_fd())?;
+        write_nameserver(fd.as_fd(), tun_gateway)?;
     }
     Ok(())
 }
@@ -177,7 +182,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> 
     for ip in tproxy_args.bypass_ips.iter() {
         bypass_ip(ip)?;
     }
-    if !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
+    if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
         bypass_ip(&tproxy_args.proxy_addr.ip())?;
     }
 
