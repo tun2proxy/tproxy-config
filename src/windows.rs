@@ -73,6 +73,24 @@ pub fn tproxy_remove(tproxy_restore: Option<TproxyRestore>) -> std::io::Result<(
         log::debug!("command \"route {:?}\" error: {}", args, _err);
     }
 
+    // Remove bypass ips
+    // command: `route delete bypass_ip`
+    for bypass_ip in tproxy_args.bypass_ips.iter() {
+        let args = &["delete", &bypass_ip.to_string()];
+        if let Err(_err) = run_command("route", args) {
+            #[cfg(feature = "log")]
+            log::debug!("command \"route {:?}\" error: {}", args, _err);
+        }
+    }
+    if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
+        let bypass_ip = tproxy_args.proxy_addr.ip();
+        let args = &["delete", &bypass_ip.to_string()];
+        if let Err(_err) = run_command("route", args) {
+            #[cfg(feature = "log")]
+            log::debug!("command \"route {:?}\" error: {}", args, _err);
+        }
+    }
+
     // 1. Remove current adapter's route
     // command: `route delete 0.0.0.0 mask 0.0.0.0`
     let args = &["delete", &unspecified, "mask", &unspecified];

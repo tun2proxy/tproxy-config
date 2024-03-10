@@ -109,6 +109,20 @@ pub fn tproxy_remove(tproxy_restore: Option<TproxyRestore>) -> std::io::Result<(
         }
     }
 
+    let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
+    let tproxy_args = state.tproxy_args.as_ref().ok_or(err)?;
+
+    // Command: `sudo route delete bypass_ip`
+    for bypass_ip in tproxy_args.bypass_ips.iter() {
+        let args = &["delete", &bypass_ip.to_string()];
+        run_command("route", args)?;
+    }
+    if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
+        let bypass_ip = tproxy_args.proxy_addr.ip();
+        let args = &["delete", &bypass_ip.to_string()];
+        run_command("route", args)?;
+    }
+
     // route delete default
     // route delete default -ifscope original_gw_scope
     // route add default original_gateway

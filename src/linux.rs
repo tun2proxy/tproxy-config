@@ -223,6 +223,14 @@ pub fn tproxy_remove(tproxy_restore: Option<TproxyRestore>) -> std::io::Result<(
             log::debug!("command \"ip route del {}\" error: {}", bypass_ip, _err);
         }
     }
+    if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
+        let bypass_ip = tproxy_args.proxy_addr.ip();
+        let args = &["route", "del", &bypass_ip.to_string()];
+        if let Err(_err) = run_command("ip", args) {
+            #[cfg(feature = "log")]
+            log::debug!("command \"ip route del {}\" error: {}", bypass_ip, _err);
+        }
+    }
 
     // sudo ip link del tun0
     let args = &["link", "del", &tproxy_args.tun_name];
