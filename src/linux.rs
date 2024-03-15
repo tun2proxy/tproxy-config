@@ -9,7 +9,7 @@ use std::str::FromStr;
 
 use cidr::IpCidr;
 
-use crate::{run_command, TproxyArgs, TproxyRestore, ETC_RESOLV_CONF_FILE};
+use crate::{run_command, TproxyArgs, TproxyState, ETC_RESOLV_CONF_FILE};
 
 fn bytes_to_lines(bytes: Vec<u8>) -> std::io::Result<Vec<String>> {
     // Convert bytes to string
@@ -61,7 +61,7 @@ fn write_nameserver(fd: std::os::fd::BorrowedFd<'_>, tun_gateway: Option<IpAddr>
     Ok(())
 }
 
-fn setup_resolv_conf(restore: &mut TproxyRestore) -> std::io::Result<()> {
+fn setup_resolv_conf(restore: &mut TproxyState) -> std::io::Result<()> {
     let tun_gateway = restore.tproxy_args.as_ref().map(|args| args.tun_gateway);
     // We use a mount here because software like NetworkManager is known to fiddle with the
     // resolv.conf file and restore it to its original state.
@@ -167,10 +167,10 @@ fn bypass_ip(ip: &IpAddr) -> std::io::Result<bool> {
     Ok(false)
 }
 
-pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> {
+pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     let tun_name = &tproxy_args.tun_name;
 
-    let mut restore = TproxyRestore {
+    let mut restore = TproxyState {
         tproxy_args: Some(tproxy_args.clone()),
         ..Default::default()
     };
@@ -204,14 +204,14 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> 
 
     setup_resolv_conf(&mut restore)?;
 
-    crate::store_restore_state(&restore)?;
+    crate::store_intermediate_state(&restore)?;
     Ok(restore)
 }
 
-pub fn tproxy_remove(tproxy_restore: Option<TproxyRestore>) -> std::io::Result<()> {
+pub fn tproxy_remove(tproxy_restore: Option<TproxyState>) -> std::io::Result<()> {
     let tproxy_restore = match tproxy_restore {
         Some(restore) => restore,
-        None => crate::retrieve_restore_state()?,
+        None => crate::retrieve_intermediate_state()?,
     };
     let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
     let tproxy_args = tproxy_restore.tproxy_args.as_ref().ok_or(err)?;

@@ -1,9 +1,9 @@
 #![cfg(target_os = "windows")]
 
-use crate::{run_command, TproxyArgs, TproxyRestore};
+use crate::{run_command, TproxyArgs, TproxyState};
 use std::net::{IpAddr, Ipv4Addr};
 
-pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> {
+pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     // 1. Setup the adapter's DNS
     // command: `netsh interface ip set dns "utun3" static 8.8.8.8`
     let dns_addr = tproxy_args.tun_dns;
@@ -31,12 +31,12 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> 
         do_bypass_ip(tproxy_args.proxy_addr.ip(), original_gateway)?;
     }
 
-    let restore = TproxyRestore {
+    let restore = TproxyState {
         tproxy_args: Some(tproxy_args.clone()),
         gateway: Some(original_gateway),
-        ..TproxyRestore::default()
+        ..TproxyState::default()
     };
-    crate::store_restore_state(&restore)?;
+    crate::store_intermediate_state(&restore)?;
 
     Ok(restore)
 }
@@ -51,10 +51,10 @@ fn do_bypass_ip(bypass_ip: IpAddr, original_gateway: IpAddr) -> std::io::Result<
     Ok(())
 }
 
-pub fn tproxy_remove(tproxy_restore: Option<TproxyRestore>) -> std::io::Result<()> {
+pub fn tproxy_remove(tproxy_restore: Option<TproxyState>) -> std::io::Result<()> {
     let mut state = match tproxy_restore {
         Some(restore) => restore,
-        None => crate::retrieve_restore_state()?,
+        None => crate::retrieve_intermediate_state()?,
     };
 
     let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");

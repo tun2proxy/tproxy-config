@@ -1,21 +1,20 @@
 #![cfg(target_os = "macos")]
 
-use crate::{is_private_ip, run_command, TproxyArgs, TproxyRestore, ETC_RESOLV_CONF_FILE};
+use crate::{run_command, TproxyArgs, TproxyState, ETC_RESOLV_CONF_FILE};
 use std::{
     net::{IpAddr, SocketAddr},
     str::FromStr,
 };
 
-pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> {
+pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     // 0. Save the original gateway and scope
     let (original_gateway_0, orig_gw_iface) = get_default_gateway()?;
     let original_gateway = original_gateway_0.to_string();
-    let dns_servers = extract_system_dns_servers()?;
+    let original_dns_servers = dns_servers_from_etc_resolv_conf_file()?;
 
     let tun_ip = tproxy_args.tun_ip.to_string();
     let tun_netmask = tproxy_args.tun_netmask.to_string();
     let tun_gateway = tproxy_args.tun_gateway.to_string();
-    let tun_dns = tproxy_args.tun_dns;
 
     // sudo sysctl -w net.inet.ip.forwarding=1
     run_command("sysctl", &["-w", "net.inet.ip.forwarding=1"])?;
@@ -24,11 +23,6 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> 
     // Command: `sudo ifconfig tun_name 10.0.0.33 10.0.0.1 netmask 255.255.255.0`
     let args = &[&tproxy_args.tun_name, &tun_ip, &tun_gateway, "netmask", &tun_netmask];
     run_command("ifconfig", args)?;
-
-    configure_system_proxy(true, None, Some(tproxy_args.proxy_addr))?;
-    if dns_servers.is_empty() || is_private_ip(dns_servers[0]) {
-        configure_dns_servers(&[tun_dns])?;
-    }
 
     // route delete default
     // route delete default -ifscope original_gw_scope
@@ -65,33 +59,38 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyRestore> 
     run_command("route", args)?;
     // */
 
-    // 5. Set the DNS server to a reserved IP address
-    // Command: `sudo sh -c "echo nameserver 10.0.0.1 > /etc/resolv.conf"`
-    let file = std::fs::OpenOptions::new().write(true).truncate(true).open(ETC_RESOLV_CONF_FILE)?;
-    let mut writer = std::io::BufWriter::new(file);
+    // 5. Set the DNS server to the gateway of the interface
+    {
+        // Command: `sudo sh -c "echo nameserver 10.0.0.1 > /etc/resolv.conf"`
+        let file = std::fs::OpenOptions::new().write(true).truncate(true).open(ETC_RESOLV_CONF_FILE)?;
+        let mut writer = std::io::BufWriter::new(file);
+        use std::io::Write;
+        writeln!(writer, "nameserver {}\n", tun_gateway)?;
 
-    use std::io::Write;
-    writeln!(writer, "nameserver {}\n", tun_gateway)?;
+        configure_dns_servers(&[tproxy_args.tun_gateway])?;
+    }
 
-    let restore = TproxyRestore {
+    configure_system_proxy(true, None, Some(tproxy_args.proxy_addr))?;
+
+    let restore = TproxyState {
         tproxy_args: Some(tproxy_args.clone()),
-        dns_servers: Some(dns_servers),
+        original_dns_servers: Some(original_dns_servers),
         gateway: Some(original_gateway_0),
         gw_scope: Some(orig_gw_iface),
-        ..TproxyRestore::default()
+        ..TproxyState::default()
     };
-    crate::store_restore_state(&restore)?;
+    crate::store_intermediate_state(&restore)?;
 
     Ok(restore)
 }
 
-pub fn tproxy_remove(tproxy_restore: Option<TproxyRestore>) -> std::io::Result<()> {
+pub fn tproxy_remove(tproxy_restore: Option<TproxyState>) -> std::io::Result<()> {
     let mut state = match tproxy_restore {
         Some(restore) => restore,
-        None => crate::retrieve_restore_state()?,
+        None => crate::retrieve_intermediate_state()?,
     };
 
-    let original_dns_servers = state.dns_servers.take().unwrap_or_default();
+    let original_dns_servers = state.original_dns_servers.take().unwrap_or_default();
 
     let err = std::io::Error::new(std::io::ErrorKind::Other, "No original gateway found");
     let original_gateway = state.gateway.take().ok_or(err)?.to_string();
@@ -105,7 +104,7 @@ pub fn tproxy_remove(tproxy_restore: Option<TproxyRestore>) -> std::io::Result<(
     if !original_dns_servers.is_empty() {
         if let Err(_err) = configure_dns_servers(&original_dns_servers) {
             #[cfg(feature = "log")]
-            log::debug!("configure_dns_servers error: {}", _err);
+            log::debug!("restore original dns servers error: {}", _err);
         }
     }
 
@@ -220,7 +219,7 @@ pub(crate) fn configure_dns_servers(dns_servers: &[IpAddr]) -> std::io::Result<(
     Ok(())
 }
 
-fn extract_system_dns_servers() -> std::io::Result<Vec<IpAddr>> {
+fn dns_servers_from_etc_resolv_conf_file() -> std::io::Result<Vec<IpAddr>> {
     let mut buf = Vec::with_capacity(4096);
     let mut f = std::fs::File::open(ETC_RESOLV_CONF_FILE)?;
     use std::io::Read;
@@ -305,8 +304,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_configure_dns_servers() {
-        let v = extract_system_dns_servers().unwrap();
+    fn test_configure_proxy_servers() {
+        let v = dns_servers_from_etc_resolv_conf_file().unwrap();
         println!("{:?}", v);
 
         // let servers = ["8.8.8.8".parse().unwrap(), "8.8.4.4".parse().unwrap()];
