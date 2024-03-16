@@ -4,15 +4,6 @@ use crate::{run_command, TproxyArgs, TproxyState};
 use std::net::{IpAddr, Ipv4Addr};
 
 pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
-    // 1. Setup the adapter's DNS
-    // command: `netsh interface ip set dns "utun3" static 8.8.8.8`
-    let dns_addr = tproxy_args.tun_dns;
-    let tun_name = format!("\"{}\"", tproxy_args.tun_name);
-    let args = &["interface", "ip", "set", "dns", &tun_name, "static", &dns_addr.to_string()];
-    run_command("netsh", args)?;
-    #[cfg(feature = "log")]
-    log::info!("netsh {:?}", args);
-
     // 2. Route all traffic to the adapter, here the destination is adapter's gateway
     // command: `route add 0.0.0.0 mask 0.0.0.0 10.1.0.1 metric 6`
     let unspecified = Ipv4Addr::UNSPECIFIED.to_string();
@@ -30,6 +21,14 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
         do_bypass_ip(tproxy_args.proxy_addr.ip(), original_gateway)?;
     }
+
+    // 1. Setup the adapter's DNS
+    // command: `netsh interface ip set dns "utun3" static 10.0.0.1`
+    let tun_name = format!("\"{}\"", tproxy_args.tun_name);
+    let args = &["interface", "ip", "set", "dns", &tun_name, "static", &gateway];
+    run_command("netsh", args)?;
+    #[cfg(feature = "log")]
+    log::info!("netsh {:?}", args);
 
     let restore = TproxyState {
         tproxy_args: Some(tproxy_args.clone()),
