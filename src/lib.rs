@@ -11,13 +11,13 @@ use std::{
 pub use {private_ip::is_private_ip, tproxy_args::TproxyArgs};
 
 #[cfg(target_os = "linux")]
-pub use {linux::tproxy_remove, linux::tproxy_setup};
+pub use linux::tproxy_setup;
 
 #[cfg(target_os = "windows")]
-pub use {windows::tproxy_remove, windows::tproxy_setup};
+pub use windows::tproxy_setup;
 
 #[cfg(target_os = "macos")]
-pub use {macos::tproxy_remove, macos::tproxy_setup};
+pub use macos::tproxy_setup;
 
 pub const TUN_NAME: &str = if cfg!(target_os = "linux") {
     "tun0"

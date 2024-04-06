@@ -170,9 +170,14 @@ fn bypass_ip(ip: &IpAddr) -> std::io::Result<bool> {
 pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     let tun_name = &tproxy_args.tun_name;
 
+    let targs = Some(tproxy_args.clone());
     let mut restore = TproxyState {
-        tproxy_args: Some(tproxy_args.clone()),
-        ..Default::default()
+        tproxy_args: targs,
+        original_dns_servers: None,
+        gateway: None,
+        gw_scope: None,
+        umount_resolvconf: false,
+        restore_resolvconf_content: None,
     };
 
     // sudo ip link set tun0 up
@@ -208,46 +213,53 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     Ok(restore)
 }
 
-pub fn tproxy_remove(tproxy_restore: Option<TproxyState>) -> std::io::Result<()> {
-    let tproxy_restore = match tproxy_restore {
-        Some(restore) => restore,
-        None => crate::retrieve_intermediate_state()?,
-    };
-    let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
-    let tproxy_args = tproxy_restore.tproxy_args.as_ref().ok_or(err)?;
-    // sudo ip route del bypass_ip
-    for bypass_ip in tproxy_args.bypass_ips.iter() {
-        let args = &["route", "del", &bypass_ip.to_string()];
-        if let Err(_err) = run_command("ip", args) {
-            #[cfg(feature = "log")]
-            log::debug!("command \"ip route del {}\" error: {}", bypass_ip, _err);
-        }
-    }
-    if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
-        let bypass_ip = tproxy_args.proxy_addr.ip();
-        let args = &["route", "del", &bypass_ip.to_string()];
-        if let Err(_err) = run_command("ip", args) {
-            #[cfg(feature = "log")]
-            log::debug!("command \"ip route del {}\" error: {}", bypass_ip, _err);
-        }
-    }
-
-    // sudo ip link del tun0
-    let args = &["link", "del", &tproxy_args.tun_name];
-    if let Err(_err) = run_command("ip", args) {
+impl Drop for TproxyState {
+    fn drop(&mut self) {
         #[cfg(feature = "log")]
-        log::debug!("command \"ip {:?}\" error: {}", args, _err);
-    }
+        log::debug!("restoring network settings");
 
-    if tproxy_restore.umount_resolvconf {
-        nix::mount::umount(ETC_RESOLV_CONF_FILE)?;
-    }
+        if let Err(_e) = (|| -> std::io::Result<()> {
+            let tproxy_restore = self;
+            let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
+            let tproxy_args = tproxy_restore.tproxy_args.as_ref().ok_or(err)?;
+            // sudo ip route del bypass_ip
+            for bypass_ip in tproxy_args.bypass_ips.iter() {
+                let args = &["route", "del", &bypass_ip.to_string()];
+                if let Err(_err) = run_command("ip", args) {
+                    #[cfg(feature = "log")]
+                    log::debug!("command \"ip route del {}\" error: {}", bypass_ip, _err);
+                }
+            }
+            if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
+                let bypass_ip = tproxy_args.proxy_addr.ip();
+                let args = &["route", "del", &bypass_ip.to_string()];
+                if let Err(_err) = run_command("ip", args) {
+                    #[cfg(feature = "log")]
+                    log::debug!("command \"ip route del {}\" error: {}", bypass_ip, _err);
+                }
+            }
 
-    if let Some(data) = &tproxy_restore.restore_resolvconf_content {
-        fs::write(ETC_RESOLV_CONF_FILE, data)?;
-    }
+            // sudo ip link del tun0
+            let args = &["link", "del", &tproxy_args.tun_name];
+            if let Err(_err) = run_command("ip", args) {
+                #[cfg(feature = "log")]
+                log::debug!("command \"ip {:?}\" error: {}", args, _err);
+            }
 
-    Ok(())
+            if tproxy_restore.umount_resolvconf {
+                nix::mount::umount(ETC_RESOLV_CONF_FILE)?;
+            }
+
+            if let Some(data) = &tproxy_restore.restore_resolvconf_content {
+                fs::write(ETC_RESOLV_CONF_FILE, data)?;
+            }
+
+            Ok(())
+        })() {
+            #[cfg(feature = "log")]
+            log::error!("failed to restore network settings: {}", _e);
+        }
+    }
 }
 
 #[allow(dead_code)]

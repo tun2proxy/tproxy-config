@@ -32,8 +32,11 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
 
     let restore = TproxyState {
         tproxy_args: Some(tproxy_args.clone()),
+        original_dns_servers: None,
         gateway: Some(original_gateway),
-        ..TproxyState::default()
+        gw_scope: None,
+        umount_resolvconf: false,
+        restore_resolvconf_content: None,
     };
     crate::store_intermediate_state(&restore)?;
 
@@ -50,67 +53,74 @@ fn do_bypass_ip(bypass_ip: IpAddr, original_gateway: IpAddr) -> std::io::Result<
     Ok(())
 }
 
-pub fn tproxy_remove(tproxy_restore: Option<TproxyState>) -> std::io::Result<()> {
-    let mut state = match tproxy_restore {
-        Some(restore) => restore,
-        None => crate::retrieve_intermediate_state()?,
-    };
-
-    let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
-    let tproxy_args = state.tproxy_args.as_ref().ok_or(err)?;
-
-    let err = std::io::Error::new(std::io::ErrorKind::Other, "No default gateway found");
-    let original_gateway = state.gateway.take().ok_or(err)?;
-    let unspecified = Ipv4Addr::UNSPECIFIED.to_string();
-
-    // 0. delete persistent route
-    // command: `route -p delete 0.0.0.0 mask 0.0.0.0 10.0.0.1`
-    let gateway = tproxy_args.tun_gateway.to_string();
-    let args = &["-p", "delete", &unspecified, "mask", &unspecified, &gateway];
-    if let Err(_err) = run_command("route", args) {
+impl Drop for TproxyState {
+    fn drop(&mut self) {
         #[cfg(feature = "log")]
-        log::debug!("command \"route {:?}\" error: {}", args, _err);
-    }
+        log::debug!("restoring network settings");
 
-    // Remove bypass ips
-    // command: `route delete bypass_ip`
-    for bypass_ip in tproxy_args.bypass_ips.iter() {
-        let args = &["delete", &bypass_ip.to_string()];
-        if let Err(_err) = run_command("route", args) {
+        if let Err(_e) = (|| -> std::io::Result<()> {
+            let state = self;
+
+            let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
+            let tproxy_args = state.tproxy_args.as_ref().ok_or(err)?;
+
+            let err = std::io::Error::new(std::io::ErrorKind::Other, "No default gateway found");
+            let original_gateway = state.gateway.take().ok_or(err)?;
+            let unspecified = Ipv4Addr::UNSPECIFIED.to_string();
+
+            // 0. delete persistent route
+            // command: `route -p delete 0.0.0.0 mask 0.0.0.0 10.0.0.1`
+            let gateway = tproxy_args.tun_gateway.to_string();
+            let args = &["-p", "delete", &unspecified, "mask", &unspecified, &gateway];
+            if let Err(_err) = run_command("route", args) {
+                #[cfg(feature = "log")]
+                log::debug!("command \"route {:?}\" error: {}", args, _err);
+            }
+
+            // Remove bypass ips
+            // command: `route delete bypass_ip`
+            for bypass_ip in tproxy_args.bypass_ips.iter() {
+                let args = &["delete", &bypass_ip.to_string()];
+                if let Err(_err) = run_command("route", args) {
+                    #[cfg(feature = "log")]
+                    log::debug!("command \"route {:?}\" error: {}", args, _err);
+                }
+            }
+            if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
+                let bypass_ip = tproxy_args.proxy_addr.ip();
+                let args = &["delete", &bypass_ip.to_string()];
+                if let Err(_err) = run_command("route", args) {
+                    #[cfg(feature = "log")]
+                    log::debug!("command \"route {:?}\" error: {}", args, _err);
+                }
+            }
+
+            // 1. Remove current adapter's route
+            // command: `route delete 0.0.0.0 mask 0.0.0.0`
+            let args = &["delete", &unspecified, "mask", &unspecified];
+            if let Err(_err) = run_command("route", args) {
+                #[cfg(feature = "log")]
+                log::debug!("command \"route {:?}\" error: {}", args, _err);
+            }
+
+            // 2. Add back the original gateway route
+            // command: `route add 0.0.0.0 mask 0.0.0.0 original_gateway metric 200`
+            let original_gateway = original_gateway.to_string();
+            let args = &["add", &unspecified, "mask", &unspecified, &original_gateway, "metric", "200"];
+            if let Err(_err) = run_command("route", args) {
+                #[cfg(feature = "log")]
+                log::debug!("command \"route {:?}\" error: {}", args, _err);
+            }
+
+            // remove the record file anyway
+            let _ = std::fs::remove_file(crate::get_state_file_path());
+
+            Ok(())
+        })() {
             #[cfg(feature = "log")]
-            log::debug!("command \"route {:?}\" error: {}", args, _err);
+            log::error!("failed to restore network settings: {}", _e);
         }
     }
-    if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
-        let bypass_ip = tproxy_args.proxy_addr.ip();
-        let args = &["delete", &bypass_ip.to_string()];
-        if let Err(_err) = run_command("route", args) {
-            #[cfg(feature = "log")]
-            log::debug!("command \"route {:?}\" error: {}", args, _err);
-        }
-    }
-
-    // 1. Remove current adapter's route
-    // command: `route delete 0.0.0.0 mask 0.0.0.0`
-    let args = &["delete", &unspecified, "mask", &unspecified];
-    if let Err(_err) = run_command("route", args) {
-        #[cfg(feature = "log")]
-        log::debug!("command \"route {:?}\" error: {}", args, _err);
-    }
-
-    // 2. Add back the original gateway route
-    // command: `route add 0.0.0.0 mask 0.0.0.0 original_gateway metric 200`
-    let original_gateway = original_gateway.to_string();
-    let args = &["add", &unspecified, "mask", &unspecified, &original_gateway, "metric", "200"];
-    if let Err(_err) = run_command("route", args) {
-        #[cfg(feature = "log")]
-        log::debug!("command \"route {:?}\" error: {}", args, _err);
-    }
-
-    // remove the record file anyway
-    let _ = std::fs::remove_file(crate::get_state_file_path());
-
-    Ok(())
 }
 
 pub(crate) fn get_default_gateway() -> std::io::Result<(IpAddr, String)> {
