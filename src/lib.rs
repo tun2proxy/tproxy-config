@@ -11,13 +11,13 @@ use std::{
 pub use {private_ip::is_private_ip, tproxy_args::TproxyArgs};
 
 #[cfg(target_os = "linux")]
-pub use linux::tproxy_setup;
+pub use linux::{tproxy_remove, tproxy_setup};
 
 #[cfg(target_os = "windows")]
-pub use windows::tproxy_setup;
+pub use windows::{tproxy_remove, tproxy_setup};
 
 #[cfg(target_os = "macos")]
-pub use macos::tproxy_setup;
+pub use macos::{tproxy_remove, tproxy_setup};
 
 pub const TUN_NAME: &str = if cfg!(target_os = "linux") {
     "tun0"
@@ -66,6 +66,7 @@ pub struct TproxyState {
     pub(crate) gw_scope: Option<String>,
     pub(crate) umount_resolvconf: bool,
     pub(crate) restore_resolvconf_content: Option<Vec<u8>>,
+    pub(crate) tproxy_removed_done: bool,
 }
 
 #[allow(dead_code)]

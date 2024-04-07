@@ -171,13 +171,14 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     let tun_name = &tproxy_args.tun_name;
 
     let targs = Some(tproxy_args.clone());
-    let mut restore = TproxyState {
+    let mut state = TproxyState {
         tproxy_args: targs,
         original_dns_servers: None,
         gateway: None,
         gw_scope: None,
         umount_resolvconf: false,
         restore_resolvconf_content: None,
+        tproxy_removed_done: false,
     };
 
     // sudo ip link set tun0 up
@@ -207,10 +208,10 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     let args = &["route", "add", "8000::/1", "dev", tun_name];
     run_command("ip", args)?;
 
-    setup_resolv_conf(&mut restore)?;
+    setup_resolv_conf(&mut state)?;
 
-    crate::store_intermediate_state(&restore)?;
-    Ok(restore)
+    crate::store_intermediate_state(&state)?;
+    Ok(state)
 }
 
 impl Drop for TproxyState {
@@ -218,48 +219,61 @@ impl Drop for TproxyState {
         #[cfg(feature = "log")]
         log::debug!("restoring network settings");
 
-        if let Err(_e) = (|| -> std::io::Result<()> {
-            let tproxy_restore = self;
-            let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
-            let tproxy_args = tproxy_restore.tproxy_args.as_ref().ok_or(err)?;
-            // sudo ip route del bypass_ip
-            for bypass_ip in tproxy_args.bypass_ips.iter() {
-                let args = &["route", "del", &bypass_ip.to_string()];
-                if let Err(_err) = run_command("ip", args) {
-                    #[cfg(feature = "log")]
-                    log::debug!("command \"ip route del {}\" error: {}", bypass_ip, _err);
-                }
-            }
-            if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
-                let bypass_ip = tproxy_args.proxy_addr.ip();
-                let args = &["route", "del", &bypass_ip.to_string()];
-                if let Err(_err) = run_command("ip", args) {
-                    #[cfg(feature = "log")]
-                    log::debug!("command \"ip route del {}\" error: {}", bypass_ip, _err);
-                }
-            }
-
-            // sudo ip link del tun0
-            let args = &["link", "del", &tproxy_args.tun_name];
-            if let Err(_err) = run_command("ip", args) {
-                #[cfg(feature = "log")]
-                log::debug!("command \"ip {:?}\" error: {}", args, _err);
-            }
-
-            if tproxy_restore.umount_resolvconf {
-                nix::mount::umount(ETC_RESOLV_CONF_FILE)?;
-            }
-
-            if let Some(data) = &tproxy_restore.restore_resolvconf_content {
-                fs::write(ETC_RESOLV_CONF_FILE, data)?;
-            }
-
-            Ok(())
-        })() {
+        if let Err(_e) = _tproxy_remove(self) {
             #[cfg(feature = "log")]
             log::error!("failed to restore network settings: {}", _e);
         }
     }
+}
+
+pub fn tproxy_remove(state: Option<TproxyState>) -> std::io::Result<()> {
+    let mut state = match state {
+        Some(state) => state,
+        None => crate::retrieve_intermediate_state()?,
+    };
+    _tproxy_remove(&mut state)
+}
+
+pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
+    if state.tproxy_removed_done {
+        return Ok(());
+    }
+    state.tproxy_removed_done = true;
+    let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
+    let tproxy_args = state.tproxy_args.as_ref().ok_or(err)?;
+    // sudo ip route del bypass_ip
+    for bypass_ip in tproxy_args.bypass_ips.iter() {
+        let args = &["route", "del", &bypass_ip.to_string()];
+        if let Err(_err) = run_command("ip", args) {
+            #[cfg(feature = "log")]
+            log::debug!("command \"ip route del {}\" error: {}", bypass_ip, _err);
+        }
+    }
+    if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
+        let bypass_ip = tproxy_args.proxy_addr.ip();
+        let args = &["route", "del", &bypass_ip.to_string()];
+        if let Err(_err) = run_command("ip", args) {
+            #[cfg(feature = "log")]
+            log::debug!("command \"ip route del {}\" error: {}", bypass_ip, _err);
+        }
+    }
+
+    // sudo ip link del tun0
+    let args = &["link", "del", &tproxy_args.tun_name];
+    if let Err(_err) = run_command("ip", args) {
+        #[cfg(feature = "log")]
+        log::debug!("command \"ip {:?}\" error: {}", args, _err);
+    }
+
+    if state.umount_resolvconf {
+        nix::mount::umount(ETC_RESOLV_CONF_FILE)?;
+    }
+
+    if let Some(data) = &state.restore_resolvconf_content {
+        fs::write(ETC_RESOLV_CONF_FILE, data)?;
+    }
+
+    Ok(())
 }
 
 #[allow(dead_code)]

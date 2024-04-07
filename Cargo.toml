@@ -1,6 +1,6 @@
 [package]
 name = "tproxy-config"
-version = "4.0.1"
+version = "3.0.2"
 edition = "2021"
 description = "Transparent proxy configuration"
 license = "MIT"
@@ -10,6 +10,7 @@ keywords = ["tun", "network", "tunnel", "transparent", "proxy"]
 readme = "readme.md"
 
 [features]
+default = []
 log = ["dep:log"]
 
 [dependencies]

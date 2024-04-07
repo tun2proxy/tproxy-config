@@ -72,105 +72,117 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
 
     configure_system_proxy(true, None, Some(tproxy_args.proxy_addr))?;
 
-    let restore = TproxyState {
+    let state = TproxyState {
         tproxy_args: Some(tproxy_args.clone()),
         original_dns_servers: Some(original_dns_servers),
         gateway: Some(original_gateway_0),
         gw_scope: Some(orig_gw_iface),
         umount_resolvconf: false,
         restore_resolvconf_content: None,
+        tproxy_removed_done: false,
     };
-    crate::store_intermediate_state(&restore)?;
+    crate::store_intermediate_state(&state)?;
 
-    Ok(restore)
+    Ok(state)
 }
 
 impl Drop for TproxyState {
     fn drop(&mut self) {
         #[cfg(feature = "log")]
         log::debug!("restoring network settings");
-
-        if let Err(_e) = (|| -> std::io::Result<()> {
-            let state = self;
-
-            let original_dns_servers = state.original_dns_servers.take().unwrap_or_default();
-
-            let err = std::io::Error::new(std::io::ErrorKind::Other, "No original gateway found");
-            let original_gateway = state.gateway.take().ok_or(err)?.to_string();
-            let err = std::io::Error::new(std::io::ErrorKind::Other, "No original gateway scope found");
-            let original_gw_scope = state.gw_scope.take().ok_or(err)?;
-
-            if let Err(_err) = configure_system_proxy(false, None, None) {
-                #[cfg(feature = "log")]
-                log::debug!("configure_system_proxy error: {}", _err);
-            }
-            if !original_dns_servers.is_empty() {
-                if let Err(_err) = configure_dns_servers(&original_dns_servers) {
-                    #[cfg(feature = "log")]
-                    log::debug!("restore original dns servers error: {}", _err);
-                }
-            }
-
-            let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
-            let tproxy_args = state.tproxy_args.as_ref().ok_or(err)?;
-
-            // Command: `sudo route delete bypass_ip`
-            for bypass_ip in tproxy_args.bypass_ips.iter() {
-                let args = &["delete", &bypass_ip.to_string()];
-                run_command("route", args)?;
-            }
-            if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
-                let bypass_ip = tproxy_args.proxy_addr.ip();
-                let args = &["delete", &bypass_ip.to_string()];
-                run_command("route", args)?;
-            }
-
-            // route delete default
-            // route delete default -ifscope original_gw_scope
-            // route add default original_gateway
-            if let Err(_err) = run_command("route", &["delete", "default"]) {
-                #[cfg(feature = "log")]
-                log::debug!("command \"route delete default\" error: {}", _err);
-            }
-            if let Err(_err) = run_command("route", &["delete", "default", "-ifscope", &original_gw_scope]) {
-                #[cfg(feature = "log")]
-                log::debug!("command \"route delete default -ifscope {}\" error: {}", original_gw_scope, _err);
-            }
-            if let Err(_err) = run_command("route", &["add", "default", &original_gateway]) {
-                #[cfg(feature = "log")]
-                log::debug!("command \"route add default {}\" error: {}", original_gateway, _err);
-            }
-
-            /*
-            let unspecified = Ipv4Addr::UNSPECIFIED.to_string();
-
-            // 1. Remove current adapter's route
-            // command: `sudo route delete 0.0.0.0`
-            let args = &["delete", &unspecified];
-            run_command("route", args)?;
-
-            // 2. Add back the original gateway route
-            // command: `sudo route add -net 0.0.0.0 original_gateway`
-            let args = &["add", "-net", &unspecified, &original_gateway];
-            run_command("route", args)?;
-            // */
-
-            // 3. Restore DNS server to the original gateway
-            // command: `sudo sh -c "echo nameserver original_gateway > /etc/resolv.conf"`
-            let file = std::fs::OpenOptions::new().write(true).truncate(true).open(ETC_RESOLV_CONF_FILE)?;
-            let mut writer = std::io::BufWriter::new(file);
-            use std::io::Write;
-            writeln!(writer, "nameserver {}\n", original_gateway)?;
-
-            // remove the record file anyway
-            let _ = std::fs::remove_file(crate::get_state_file_path());
-
-            Ok(())
-        })() {
+        if let Err(_e) = _tproxy_remove(self) {
             #[cfg(feature = "log")]
             log::error!("failed to restore network settings: {}", _e);
         }
     }
+}
+
+pub fn tproxy_remove(state: Option<TproxyState>) -> std::io::Result<()> {
+    let mut state = match state {
+        Some(state) => state,
+        None => crate::retrieve_intermediate_state()?,
+    };
+    _tproxy_remove(&mut state)
+}
+
+fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
+    if state.tproxy_removed_done {
+        return Ok(());
+    }
+    state.tproxy_removed_done = true;
+    let original_dns_servers = state.original_dns_servers.take().unwrap_or_default();
+
+    let err = std::io::Error::new(std::io::ErrorKind::Other, "No original gateway found");
+    let original_gateway = state.gateway.take().ok_or(err)?.to_string();
+    let err = std::io::Error::new(std::io::ErrorKind::Other, "No original gateway scope found");
+    let original_gw_scope = state.gw_scope.take().ok_or(err)?;
+
+    if let Err(_err) = configure_system_proxy(false, None, None) {
+        #[cfg(feature = "log")]
+        log::debug!("configure_system_proxy error: {}", _err);
+    }
+    if !original_dns_servers.is_empty() {
+        if let Err(_err) = configure_dns_servers(&original_dns_servers) {
+            #[cfg(feature = "log")]
+            log::debug!("restore original dns servers error: {}", _err);
+        }
+    }
+
+    let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
+    let tproxy_args = state.tproxy_args.as_ref().ok_or(err)?;
+
+    // Command: `sudo route delete bypass_ip`
+    for bypass_ip in tproxy_args.bypass_ips.iter() {
+        let args = &["delete", &bypass_ip.to_string()];
+        run_command("route", args)?;
+    }
+    if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
+        let bypass_ip = tproxy_args.proxy_addr.ip();
+        let args = &["delete", &bypass_ip.to_string()];
+        run_command("route", args)?;
+    }
+
+    // route delete default
+    // route delete default -ifscope original_gw_scope
+    // route add default original_gateway
+    if let Err(_err) = run_command("route", &["delete", "default"]) {
+        #[cfg(feature = "log")]
+        log::debug!("command \"route delete default\" error: {}", _err);
+    }
+    if let Err(_err) = run_command("route", &["delete", "default", "-ifscope", &original_gw_scope]) {
+        #[cfg(feature = "log")]
+        log::debug!("command \"route delete default -ifscope {}\" error: {}", original_gw_scope, _err);
+    }
+    if let Err(_err) = run_command("route", &["add", "default", &original_gateway]) {
+        #[cfg(feature = "log")]
+        log::debug!("command \"route add default {}\" error: {}", original_gateway, _err);
+    }
+
+    /*
+    let unspecified = Ipv4Addr::UNSPECIFIED.to_string();
+
+    // 1. Remove current adapter's route
+    // command: `sudo route delete 0.0.0.0`
+    let args = &["delete", &unspecified];
+    run_command("route", args)?;
+
+    // 2. Add back the original gateway route
+    // command: `sudo route add -net 0.0.0.0 original_gateway`
+    let args = &["add", "-net", &unspecified, &original_gateway];
+    run_command("route", args)?;
+    // */
+
+    // 3. Restore DNS server to the original gateway
+    // command: `sudo sh -c "echo nameserver original_gateway > /etc/resolv.conf"`
+    let file = std::fs::OpenOptions::new().write(true).truncate(true).open(ETC_RESOLV_CONF_FILE)?;
+    let mut writer = std::io::BufWriter::new(file);
+    use std::io::Write;
+    writeln!(writer, "nameserver {}\n", original_gateway)?;
+
+    // remove the record file anyway
+    let _ = std::fs::remove_file(crate::get_state_file_path());
+
+    Ok(())
 }
 
 pub(crate) fn get_default_gateway() -> std::io::Result<(IpAddr, String)> {
