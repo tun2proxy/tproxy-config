@@ -30,14 +30,18 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     #[cfg(feature = "log")]
     log::info!("netsh {:?}", args);
 
-    let restore = TproxyState {
+    let state = TproxyState {
         tproxy_args: Some(tproxy_args.clone()),
+        original_dns_servers: None,
         gateway: Some(original_gateway),
-        ..TproxyState::default()
+        gw_scope: None,
+        umount_resolvconf: false,
+        restore_resolvconf_content: None,
+        tproxy_removed_done: false,
     };
-    crate::store_intermediate_state(&restore)?;
+    crate::store_intermediate_state(&state)?;
 
-    Ok(restore)
+    Ok(state)
 }
 
 fn do_bypass_ip(bypass_ip: IpAddr, original_gateway: IpAddr) -> std::io::Result<()> {
@@ -50,12 +54,30 @@ fn do_bypass_ip(bypass_ip: IpAddr, original_gateway: IpAddr) -> std::io::Result<
     Ok(())
 }
 
-pub fn tproxy_remove(tproxy_restore: Option<TproxyState>) -> std::io::Result<()> {
-    let mut state = match tproxy_restore {
-        Some(restore) => restore,
+impl Drop for TproxyState {
+    fn drop(&mut self) {
+        #[cfg(feature = "log")]
+        log::debug!("restoring network settings");
+        if let Err(_e) = _tproxy_remove(self) {
+            #[cfg(feature = "log")]
+            log::error!("failed to restore network settings: {}", _e);
+        }
+    }
+}
+
+pub fn tproxy_remove(tproxy_state: Option<TproxyState>) -> std::io::Result<()> {
+    let mut state = match tproxy_state {
+        Some(state) => state,
         None => crate::retrieve_intermediate_state()?,
     };
+    _tproxy_remove(&mut state)
+}
 
+fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
+    if state.tproxy_removed_done {
+        return Ok(());
+    }
+    state.tproxy_removed_done = true;
     let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
     let tproxy_args = state.tproxy_args.as_ref().ok_or(err)?;
 
