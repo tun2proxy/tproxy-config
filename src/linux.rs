@@ -11,22 +11,28 @@ use cidr::IpCidr;
 
 use crate::{run_command, TproxyArgs, TproxyState, ETC_RESOLV_CONF_FILE};
 
+fn bytes_to_string(bytes: Vec<u8>) -> std::io::Result<String> {
+    match String::from_utf8(bytes) {
+        Ok(content) => Ok(content),
+        Err(e) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("error converting bytes to string: {}", e),
+        )),
+    }
+}
+
 fn bytes_to_lines(bytes: Vec<u8>) -> std::io::Result<Vec<String>> {
     // Convert bytes to string
-    let content = match String::from_utf8(bytes) {
-        Ok(content) => content,
-        Err(e) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Error converting bytes to string: {}", e),
-            ));
-        }
-    };
+    let content = bytes_to_string(bytes)?;
 
     // Split string into lines
     let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
 
     Ok(lines)
+}
+
+fn route_exists(route: &str) -> std::io::Result<bool> {
+    Ok(!bytes_to_string(run_command("ip", &["route", "show", route])?)?.trim().is_empty())
 }
 
 fn create_cidr(addr: IpAddr, len: u8) -> std::io::Result<IpCidr> {
@@ -99,15 +105,12 @@ fn setup_resolv_conf(restore: &mut TproxyState) -> std::io::Result<()> {
     Ok(())
 }
 
-fn bypass_ip(ip: &IpAddr) -> std::io::Result<bool> {
-    let is_ipv6 = ip.is_ipv6();
+fn route_show(is_ipv6: bool) -> std::io::Result<Vec<(IpCidr, Vec<String>)>> {
     let route_show_args = if is_ipv6 {
         ["-6", "route", "show"]
     } else {
         ["-4", "route", "show"]
     };
-
-    let cidr = create_cidr(*ip, if is_ipv6 { 128 } else { 32 })?;
 
     /*
     The resulting vector, route_info, contains tuples where each tuple consists of two elements:
@@ -140,6 +143,13 @@ fn bypass_ip(ip: &IpAddr) -> std::io::Result<bool> {
         let route_components: Vec<String> = split.map(String::from).collect();
         route_info.push((cidr, route_components))
     }
+    Ok(route_info)
+}
+
+fn bypass_ip(ip: &IpAddr) -> std::io::Result<bool> {
+    let mut route_info = route_show(ip.is_ipv6())?;
+
+    let cidr = create_cidr(*ip, if ip.is_ipv6() { 128 } else { 32 })?;
 
     // Sort routes by prefix length, the most specific route comes first.
     route_info.sort_by(|entry1, entry2| entry2.0.network_length().cmp(&entry1.0.network_length()));
@@ -167,6 +177,30 @@ fn bypass_ip(ip: &IpAddr) -> std::io::Result<bool> {
     Ok(false)
 }
 
+pub fn get_restore_components(route: &str) -> std::io::Result<Option<Vec<String>>> {
+    let cidr_all = IpCidr::from_str(route).unwrap();
+    let routes = route_show(cidr_all.is_ipv6())?;
+    let default_route = routes.iter().find(|(cidr, _)| cidr == &cidr_all);
+    match default_route {
+        None => Ok(None),
+        Some((_, components)) => {
+            let mut vec = Vec::new();
+            vec.push(String::from(route));
+            vec.extend(components.clone());
+            Ok(Some(vec))
+        }
+    }
+}
+
+pub fn restore_route(route_components: &[String]) -> std::io::Result<()> {
+    let mut args = Vec::new();
+    args.push("route");
+    args.push("add");
+    args.extend(route_components.iter().map(|x| x.as_str()));
+    run_command("ip", args.as_slice())?;
+    Ok(())
+}
+
 pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     let tun_name = &tproxy_args.tun_name;
 
@@ -179,6 +213,8 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         umount_resolvconf: false,
         restore_resolvconf_content: None,
         tproxy_removed_done: false,
+        restore_ipv4_route: None,
+        restore_ipv6_route: None,
     };
 
     // sudo ip link set tun0 up
@@ -192,21 +228,61 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         bypass_ip(&tproxy_args.proxy_addr.ip())?;
     }
 
-    // sudo ip route add 128.0.0.0/1 dev tun0
-    let args = &["route", "add", "128.0.0.0/1", "dev", tun_name];
-    run_command("ip", args)?;
+    if tproxy_args.ipv4_default_route {
+        if !route_exists("0.0.0.0/0")? {
+            // sudo ip route add 0.0.0.0/0 dev tun0
+            let args = &["route", "add", "0.0.0.0/0", "dev", tun_name];
+            run_command("ip", args)?;
+        } else {
+            // sudo ip route add 128.0.0.0/1 dev tun0
+            let args = &["route", "add", "128.0.0.0/1", "dev", tun_name];
+            run_command("ip", args)?;
 
-    // sudo ip route add 0.0.0.0/1 dev tun0
-    let args = &["route", "add", "0.0.0.0/1", "dev", tun_name];
-    run_command("ip", args)?;
+            // sudo ip route add 0.0.0.0/1 dev tun0
+            let args = &["route", "add", "0.0.0.0/1", "dev", tun_name];
+            run_command("ip", args)?;
+        }
+    } else {
+        // If IPv4 is not enabled, we do not want IPv4 traffic to bypass the proxy if a route
+        // already exists.
+        state.restore_ipv4_route = get_restore_components("0.0.0.0/0")?;
 
-    // sudo ip route add ::/1 dev tun0
-    let args = &["route", "add", "::/1", "dev", tun_name];
-    run_command("ip", args)?;
+        #[cfg(feature = "log")]
+        log::debug!("restore ipv4 route: {:?}", state.restore_ipv4_route);
 
-    // sudo ip route add 8000::/1 dev tun0
-    let args = &["route", "add", "8000::/1", "dev", tun_name];
-    run_command("ip", args)?;
+        if let Err(_err) = run_command("ip", &["route", "del", "0.0.0.0/0"]) {
+            #[cfg(feature = "log")]
+            log::debug!("command \"ip route del 0.0.0.0/0\" error: {}", _err);
+        }
+    }
+
+    if tproxy_args.ipv6_default_route {
+        if !route_exists("::/0")? {
+            // sudo ip route add ::/0 dev tun0
+            let args = &["route", "add", "::/0", "dev", tun_name];
+            run_command("ip", args)?;
+        } else {
+            // sudo ip route add ::/1 dev tun0
+            let args = &["route", "add", "::/1", "dev", tun_name];
+            run_command("ip", args)?;
+
+            // sudo ip route add 8000::/1 dev tun0
+            let args = &["route", "add", "8000::/1", "dev", tun_name];
+            run_command("ip", args)?;
+        }
+    } else {
+        // If IPv6 is not enabled, we do not want IPv6 traffic to bypass the proxy if a route
+        // already exists.
+        state.restore_ipv6_route = get_restore_components("::/0")?;
+
+        #[cfg(feature = "log")]
+        log::debug!("restore ipv6 route: {:?}", state.restore_ipv6_route);
+
+        if let Err(_err) = run_command("ip", &["route", "del", "::/0"]) {
+            #[cfg(feature = "log")]
+            log::debug!("command \"ip route del ::/0\" error: {}", _err);
+        }
+    }
 
     setup_resolv_conf(&mut state)?;
 
@@ -256,6 +332,18 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
             #[cfg(feature = "log")]
             log::debug!("command \"ip route del {}\" error: {}", bypass_ip, _err);
         }
+    }
+
+    if let Some(components) = &state.restore_ipv4_route {
+        #[cfg(feature = "log")]
+        log::debug!("restore route: {:?}", components);
+        restore_route(components.as_slice())?;
+    }
+
+    if let Some(components) = &state.restore_ipv6_route {
+        #[cfg(feature = "log")]
+        log::debug!("restore route: {:?}", components);
+        restore_route(components.as_slice())?;
     }
 
     // sudo ip link del tun0

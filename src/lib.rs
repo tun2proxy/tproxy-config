@@ -67,6 +67,10 @@ pub struct TproxyState {
     pub(crate) umount_resolvconf: bool,
     pub(crate) restore_resolvconf_content: Option<Vec<u8>>,
     pub(crate) tproxy_removed_done: bool,
+    #[cfg(target_os = "linux")]
+    pub(crate) restore_ipv4_route: Option<Vec<String>>,
+    #[cfg(target_os = "linux")]
+    pub(crate) restore_ipv6_route: Option<Vec<String>>,
 }
 
 #[allow(dead_code)]
