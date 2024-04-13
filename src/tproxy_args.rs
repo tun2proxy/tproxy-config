@@ -12,6 +12,8 @@ pub struct TproxyArgs {
     pub tun_name: String,
     pub proxy_addr: SocketAddr,
     pub bypass_ips: Vec<IpAddr>,
+    pub ipv4_default_route: bool,
+    pub ipv6_default_route: bool,
 }
 
 impl Default for TproxyArgs {
@@ -25,6 +27,8 @@ impl Default for TproxyArgs {
             tun_name: TUN_NAME.to_string(),
             proxy_addr: PROXY_ADDR,
             bypass_ips: vec![],
+            ipv4_default_route: true,
+            ipv6_default_route: false,
         }
     }
 }
@@ -71,6 +75,16 @@ impl TproxyArgs {
 
     pub fn bypass_ips(mut self, bypass_ips: &[IpAddr]) -> Self {
         self.bypass_ips = bypass_ips.to_vec();
+        self
+    }
+
+    pub fn ipv6_default_route(mut self, enabled: bool) -> Self {
+        self.ipv6_default_route = enabled;
+        self
+    }
+
+    pub fn ipv4_default_route(mut self, enabled: bool) -> Self {
+        self.ipv6_default_route = enabled;
         self
     }
 }
