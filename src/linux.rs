@@ -296,8 +296,9 @@ impl Drop for TproxyState {
         log::debug!("restoring network settings");
 
         if let Err(_e) = _tproxy_remove(self) {
+            let _pid = std::process::id();
             #[cfg(feature = "log")]
-            log::error!("failed to restore network settings: {}", _e);
+            log::error!("Current process \"{}\" failed to restore network settings: {}", _pid, _e);
         }
     }
 }
@@ -337,13 +338,19 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     if let Some(components) = &state.restore_ipv4_route {
         #[cfg(feature = "log")]
         log::debug!("restore route: {:?}", components);
-        restore_route(components.as_slice())?;
+        if let Err(_err) = restore_route(components.as_slice()) {
+            #[cfg(feature = "log")]
+            log::debug!("restore_route error: {}", _err);
+        }
     }
 
     if let Some(components) = &state.restore_ipv6_route {
         #[cfg(feature = "log")]
         log::debug!("restore route: {:?}", components);
-        restore_route(components.as_slice())?;
+        if let Err(_err) = restore_route(components.as_slice()) {
+            #[cfg(feature = "log")]
+            log::debug!("restore_route error: {}", _err);
+        }
     }
 
     // sudo ip link del tun0
