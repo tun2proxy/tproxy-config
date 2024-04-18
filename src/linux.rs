@@ -31,8 +31,13 @@ fn bytes_to_lines(bytes: Vec<u8>) -> std::io::Result<Vec<String>> {
     Ok(lines)
 }
 
-fn route_exists(route: &str) -> std::io::Result<bool> {
-    Ok(!bytes_to_string(run_command("ip", &["route", "show", route])?)?.trim().is_empty())
+fn route_exists(route: &str, ipv6: bool) -> std::io::Result<bool> {
+    let args = if ipv6 {
+        ["-6", "route", "show", route]
+    } else {
+        ["-4", "route", "show", route]
+    };
+    Ok(!bytes_to_string(run_command("ip", &args)?)?.trim().is_empty())
 }
 
 fn create_cidr(addr: IpAddr, len: u8) -> std::io::Result<IpCidr> {
@@ -229,7 +234,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     }
 
     if tproxy_args.ipv4_default_route {
-        if !route_exists("0.0.0.0/0")? {
+        if !route_exists("0.0.0.0/0", false)? {
             // sudo ip route add 0.0.0.0/0 dev tun0
             let args = &["route", "add", "0.0.0.0/0", "dev", tun_name];
             run_command("ip", args)?;
@@ -257,7 +262,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     }
 
     if tproxy_args.ipv6_default_route {
-        if !route_exists("::/0")? {
+        if !route_exists("::/0", true)? {
             // sudo ip route add ::/0 dev tun0
             let args = &["route", "add", "::/0", "dev", tun_name];
             run_command("ip", args)?;
