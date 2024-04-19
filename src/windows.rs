@@ -19,7 +19,8 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         do_bypass_ip(*bypass_ip, original_gateway)?;
     }
     if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
-        do_bypass_ip(tproxy_args.proxy_addr.ip(), original_gateway)?;
+        let cidr = cidr::IpCidr::new_host(tproxy_args.proxy_addr.ip());
+        do_bypass_ip(cidr, original_gateway)?;
     }
 
     // 1. Setup the adapter's DNS
@@ -44,9 +45,9 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     Ok(state)
 }
 
-fn do_bypass_ip(bypass_ip: IpAddr, original_gateway: IpAddr) -> std::io::Result<()> {
+fn do_bypass_ip(bypass_ip: cidr::IpCidr, original_gateway: IpAddr) -> std::io::Result<()> {
     // route the bypass ip to the original gateway
-    // command: `route add bypass_ip original_gateway metric 1`
+    // command: `route add bypass_ip/24 original_gateway metric 1`
     let args = &["add", &bypass_ip.to_string(), &original_gateway.to_string(), "metric", "1"];
     run_command("route", args)?;
     #[cfg(feature = "log")]
@@ -104,7 +105,7 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
         }
     }
     if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
-        let bypass_ip = tproxy_args.proxy_addr.ip();
+        let bypass_ip = cidr::IpCidr::new_host(tproxy_args.proxy_addr.ip());
         let args = &["delete", &bypass_ip.to_string()];
         if let Err(_err) = run_command("route", args) {
             #[cfg(feature = "log")]

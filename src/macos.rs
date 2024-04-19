@@ -1,5 +1,7 @@
 #![cfg(target_os = "macos")]
 
+use cidr::IpCidr;
+
 use crate::{run_command, TproxyArgs, TproxyState, ETC_RESOLV_CONF_FILE};
 use std::{
     net::{IpAddr, SocketAddr},
@@ -40,7 +42,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         run_command("route", args)?;
     }
     if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
-        let bypass_ip = tproxy_args.proxy_addr.ip();
+        let bypass_ip = IpCidr::new_host(tproxy_args.proxy_addr.ip());
         let args = &["add", &bypass_ip.to_string(), &original_gateway];
         run_command("route", args)?;
     }
@@ -131,13 +133,13 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
     let tproxy_args = state.tproxy_args.as_ref().ok_or(err)?;
 
-    // Command: `sudo route delete bypass_ip`
+    // Command: `sudo route delete bypass_ip/24`
     for bypass_ip in tproxy_args.bypass_ips.iter() {
         let args = &["delete", &bypass_ip.to_string()];
         run_command("route", args)?;
     }
     if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
-        let bypass_ip = tproxy_args.proxy_addr.ip();
+        let bypass_ip = IpCidr::new_host(tproxy_args.proxy_addr.ip());
         let args = &["delete", &bypass_ip.to_string()];
         run_command("route", args)?;
     }

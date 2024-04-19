@@ -151,10 +151,10 @@ fn route_show(is_ipv6: bool) -> std::io::Result<Vec<(IpCidr, Vec<String>)>> {
     Ok(route_info)
 }
 
-fn bypass_ip(ip: &IpAddr) -> std::io::Result<bool> {
+fn do_bypass_ip(ip: &IpCidr) -> std::io::Result<bool> {
     let mut route_info = route_show(ip.is_ipv6())?;
 
-    let cidr = create_cidr(*ip, if ip.is_ipv6() { 128 } else { 32 })?;
+    let cidr = *ip;
 
     // Sort routes by prefix length, the most specific route comes first.
     route_info.sort_by(|entry1, entry2| entry2.0.network_length().cmp(&entry1.0.network_length()));
@@ -227,10 +227,11 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     run_command("ip", args)?;
 
     for ip in tproxy_args.bypass_ips.iter() {
-        bypass_ip(ip)?;
+        do_bypass_ip(ip)?;
     }
     if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
-        bypass_ip(&tproxy_args.proxy_addr.ip())?;
+        let cidr = IpCidr::new_host(tproxy_args.proxy_addr.ip());
+        do_bypass_ip(&cidr)?;
     }
 
     if tproxy_args.ipv4_default_route {
@@ -323,7 +324,7 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     state.tproxy_removed_done = true;
     let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
     let tproxy_args = state.tproxy_args.as_ref().ok_or(err)?;
-    // sudo ip route del bypass_ip
+    // sudo ip route del bypass_ip/24
     for bypass_ip in tproxy_args.bypass_ips.iter() {
         let args = &["route", "del", &bypass_ip.to_string()];
         if let Err(_err) = run_command("ip", args) {
@@ -332,7 +333,7 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
         }
     }
     if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
-        let bypass_ip = tproxy_args.proxy_addr.ip();
+        let bypass_ip = IpCidr::new_host(tproxy_args.proxy_addr.ip());
         let args = &["route", "del", &bypass_ip.to_string()];
         if let Err(_err) = run_command("ip", args) {
             #[cfg(feature = "log")]
@@ -405,7 +406,7 @@ mod tests {
     #[test]
     fn test_bypass_ip() {
         let ip = "123.45.67.89".parse().unwrap();
-        let res = bypass_ip(&ip);
-        println!("bypass_ip: {:?}", res);
+        let res = do_bypass_ip(&ip);
+        println!("do_bypass_ip: {:?}", res);
     }
 }
