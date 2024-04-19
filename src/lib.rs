@@ -10,6 +10,8 @@ use std::{
 };
 pub use {private_ip::is_private_ip, tproxy_args::TproxyArgs};
 
+pub use cidr::IpCidr;
+
 #[cfg(target_os = "linux")]
 pub use linux::{tproxy_remove, tproxy_setup};
 

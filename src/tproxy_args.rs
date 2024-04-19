@@ -1,6 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
 
-use crate::{PROXY_ADDR, TUN_DNS, TUN_GATEWAY, TUN_IPV4, TUN_MTU, TUN_NAME, TUN_NETMASK};
+use crate::{IpCidr, PROXY_ADDR, TUN_DNS, TUN_GATEWAY, TUN_IPV4, TUN_MTU, TUN_NAME, TUN_NETMASK};
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct TproxyArgs {
@@ -11,7 +11,7 @@ pub struct TproxyArgs {
     pub tun_mtu: u16,
     pub tun_name: String,
     pub proxy_addr: SocketAddr,
-    pub bypass_ips: Vec<IpAddr>,
+    pub bypass_ips: Vec<IpCidr>,
     pub ipv4_default_route: bool,
     pub ipv6_default_route: bool,
 }
@@ -73,7 +73,7 @@ impl TproxyArgs {
         self
     }
 
-    pub fn bypass_ips(mut self, bypass_ips: &[IpAddr]) -> Self {
+    pub fn bypass_ips(mut self, bypass_ips: &[IpCidr]) -> Self {
         self.bypass_ips = bypass_ips.to_vec();
         self
     }

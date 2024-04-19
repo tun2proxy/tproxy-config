@@ -14,7 +14,7 @@ default = []
 log = ["dep:log"]
 
 [dependencies]
-cidr = "0.2"
+cidr = { version = "0.2", features = ["serde"] }
 log = { version = "0.4", optional = true }
 regex = "1.10"
 serde = { version = "1.0", features = ["derive"] }
