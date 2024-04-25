@@ -9,9 +9,9 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     let unspecified = Ipv4Addr::UNSPECIFIED.to_string();
     let gateway = tproxy_args.tun_gateway.to_string();
     let args = &["add", &unspecified, "mask", &unspecified, &gateway, "metric", "6"];
-    run_command("route", args)?;
     #[cfg(feature = "log")]
     log::info!("route {:?}", args);
+    run_command("route", args)?;
 
     let (original_gateway, _) = get_default_gateway()?;
 
@@ -27,9 +27,9 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     // command: `netsh interface ip set dns "utun3" static 10.0.0.1`
     let tun_name = format!("\"{}\"", tproxy_args.tun_name);
     let args = &["interface", "ip", "set", "dns", &tun_name, "static", &gateway];
-    run_command("netsh", args)?;
     #[cfg(feature = "log")]
     log::info!("netsh {:?}", args);
+    run_command("netsh", args)?;
 
     let state = TproxyState {
         tproxy_args: Some(tproxy_args.clone()),
@@ -49,9 +49,9 @@ fn do_bypass_ip(bypass_ip: cidr::IpCidr, original_gateway: IpAddr) -> std::io::R
     // route the bypass ip to the original gateway
     // command: `route add bypass_ip/24 original_gateway metric 1`
     let args = &["add", &bypass_ip.to_string(), &original_gateway.to_string(), "metric", "1"];
-    run_command("route", args)?;
     #[cfg(feature = "log")]
     log::info!("route {:?}", args);
+    run_command("route", args)?;
     Ok(())
 }
 
@@ -138,7 +138,14 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
 
 pub(crate) fn get_default_gateway() -> std::io::Result<(IpAddr, String)> {
     let cmd = "Get-WmiObject -Class Win32_NetworkAdapterConfiguration -Filter IPEnabled=TRUE | ForEach-Object { $_.DefaultIPGateway }";
-    let gateways = run_command("powershell", &["-Command", cmd])?;
+    let gateways = match run_command("powershell", &["-Command", cmd]) {
+        Ok(gateways) => gateways,
+        Err(e) => {
+            let str = format!("Command \"powershell -Command {}\" error: {}", cmd, e);
+            let err = std::io::Error::new(std::io::ErrorKind::Other, str);
+            return Err(err);
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&gateways).into_owned();
     let lines: Vec<&str> = stdout.lines().collect();
@@ -168,7 +175,14 @@ pub(crate) fn get_default_gateway() -> std::io::Result<(IpAddr, String)> {
 
 pub(crate) fn get_default_gateway_interface() -> std::io::Result<String> {
     let cmd = "Get-WmiObject -Class Win32_NetworkAdapter | Where-Object { $_.NetConnectionStatus -eq 2 } | Select-Object -First 1 -ExpandProperty NetConnectionID";
-    let iface = run_command("powershell", &["-Command", cmd])?;
+    let iface = match run_command("powershell", &["-Command", cmd]) {
+        Ok(iface) => iface,
+        Err(e) => {
+            let str = format!("Command \"powershell -Command {}\" error: {}", cmd, e);
+            let err = std::io::Error::new(std::io::ErrorKind::Other, str);
+            return Err(err);
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&iface).into_owned();
     let iface = stdout.trim().to_string();
