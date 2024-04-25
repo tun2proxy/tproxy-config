@@ -6,7 +6,11 @@ use std::net::{IpAddr, Ipv4Addr};
 pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     // 2. Route all traffic to the adapter, here the destination is adapter's gateway
     // command: `route add 0.0.0.0 mask 0.0.0.0 10.1.0.1 metric 6`
-    let unspecified = Ipv4Addr::UNSPECIFIED.to_string();
+    let unspecified = if tproxy_args.tun_gateway.is_ipv4() {
+        Ipv4Addr::UNSPECIFIED.to_string()
+    } else {
+        std::net::Ipv6Addr::UNSPECIFIED.to_string()
+    };
     let gateway = tproxy_args.tun_gateway.to_string();
     let args = &["add", &unspecified, "mask", &unspecified, &gateway, "metric", "6"];
     #[cfg(feature = "log")]
