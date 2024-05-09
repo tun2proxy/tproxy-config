@@ -135,6 +135,13 @@ fn route_show(is_ipv6: bool) -> std::io::Result<Vec<(IpCidr, Vec<String>)>> {
 
         let mut split = line.split_whitespace();
         let mut dst_str = split.next().unwrap();
+
+        // NOTE: ignore routes like "multicast ff00::/8 dev eth1 metric 256"
+        if dst_str == "multicast" {
+            // dst_str = split.next().unwrap();
+            continue;
+        }
+
         if dst_str == "default" {
             dst_str = if is_ipv6 { "::/0" } else { "0.0.0.0/0" }
         }
@@ -146,7 +153,7 @@ fn route_show(is_ipv6: bool) -> std::io::Result<Vec<(IpCidr, Vec<String>)>> {
 
         let cidr: IpCidr = create_cidr(IpAddr::from_str(addr_str).unwrap(), u8::from_str(prefix_len_str).unwrap())?;
         let route_components: Vec<String> = split.map(String::from).collect();
-        route_info.push((cidr, route_components))
+        route_info.push((cidr, route_components));
     }
     Ok(route_info)
 }
