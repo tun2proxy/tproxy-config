@@ -4,6 +4,8 @@ use crate::{run_command, TproxyArgs, TproxyState};
 use std::net::{IpAddr, Ipv4Addr};
 
 pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
+    flush_dns_cache()?;
+
     // 2. Route all traffic to the adapter, here the destination is adapter's gateway
     // command: `route add 0.0.0.0 mask 0.0.0.0 10.1.0.1 metric 6`
     let unspecified = if tproxy_args.tun_gateway.is_ipv4() {
@@ -137,6 +139,8 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     // remove the record file anyway
     let _ = std::fs::remove_file(crate::get_state_file_path());
 
+    flush_dns_cache()?;
+
     Ok(())
 }
 
@@ -192,6 +196,12 @@ pub(crate) fn get_default_gateway_interface() -> std::io::Result<String> {
     let iface = stdout.trim().to_string();
 
     Ok(iface)
+}
+
+pub(crate) fn flush_dns_cache() -> std::io::Result<()> {
+    // command: `ipconfig /flushdns`
+    run_command("ipconfig", &["/flushdns"])?;
+    Ok(())
 }
 
 #[cfg(test)]

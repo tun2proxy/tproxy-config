@@ -229,6 +229,8 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         restore_ipv6_route: None,
     };
 
+    flush_dns_cache()?;
+
     // sudo ip link set tun0 up
     let args = &["link", "set", tun_name, "up"];
     run_command("ip", args)?;
@@ -381,6 +383,13 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
         fs::write(ETC_RESOLV_CONF_FILE, data)?;
     }
 
+    flush_dns_cache()?;
+
+    Ok(())
+}
+
+pub(crate) fn flush_dns_cache() -> std::io::Result<()> {
+    // do nothing in linux
     Ok(())
 }
 

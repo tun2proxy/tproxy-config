@@ -64,7 +64,7 @@ impl TproxyArgs {
     }
 
     pub fn tun_name(mut self, tun_name: &str) -> Self {
-        self.tun_name = tun_name.to_owned();
+        tun_name.clone_into(&mut self.tun_name);
         self
     }
 

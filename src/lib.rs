@@ -91,3 +91,22 @@ pub(crate) fn retrieve_intermediate_state() -> std::io::Result<TproxyState> {
     let s = std::fs::read_to_string(path)?;
     Ok(serde_json::from_str::<TproxyState>(&s)?)
 }
+
+/// Compare two version strings
+/// Returns 1 if v1 > v2, -1 if v1 < v2, 0 if v1 == v2
+#[allow(dead_code)]
+pub(crate) fn compare_version(v1: &str, v2: &str) -> i32 {
+    let n = v1.len().abs_diff(v2.len());
+    let split_parse = |ver: &str| -> Vec<i32> {
+        ver.split('.')
+            .filter_map(|s| s.parse::<i32>().ok())
+            .chain(std::iter::repeat(0).take(n))
+            .collect()
+    };
+
+    std::iter::zip(split_parse(v1), split_parse(v2))
+        .skip_while(|(a, b)| a == b)
+        .map(|(a, b)| if a > b { 1 } else { -1 })
+        .next()
+        .unwrap_or(0)
+}

@@ -9,6 +9,8 @@ use std::{
 };
 
 pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
+    flush_dns_cache()?;
+
     // 0. Save the original gateway and scope
     let (original_gateway_0, orig_gw_iface) = get_default_gateway()?;
     let original_gateway = original_gateway_0.to_string();
@@ -184,6 +186,8 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     // remove the record file anyway
     let _ = std::fs::remove_file(crate::get_state_file_path());
 
+    flush_dns_cache()?;
+
     Ok(())
 }
 
@@ -318,6 +322,22 @@ fn configure_system_proxy(state: bool, http_proxy: Option<SocketAddr>, socks_pro
     );
 
     let _r = run_command("sh", &["-c", &script])?;
+    Ok(())
+}
+
+pub(crate) fn flush_dns_cache() -> std::io::Result<()> {
+    // retrieve current macos version `sw_vers -productVersion`
+    let ver = run_command("sw_vers", &["-productVersion"])?;
+    let ver = String::from_utf8_lossy(&ver).into_owned();
+
+    if crate::compare_version(&ver, "10.12") >= 0 {
+        // MacOS version 10.12 and later
+        // Command: `sudo killall -HUP mDNSResponder`
+        run_command("killall", &["-HUP", "mDNSResponder"])?;
+    } else {
+        // to make the code simpler, we do nothing for MacOS version 10.11 and earlier
+    }
+
     Ok(())
 }
 
