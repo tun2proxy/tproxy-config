@@ -14,6 +14,7 @@ pub struct TproxyArgs {
     pub bypass_ips: Vec<IpCidr>,
     pub ipv4_default_route: bool,
     pub ipv6_default_route: bool,
+    pub gateway_mode: bool,
 }
 
 impl Default for TproxyArgs {
@@ -29,6 +30,7 @@ impl Default for TproxyArgs {
             bypass_ips: vec![],
             ipv4_default_route: true,
             ipv6_default_route: false,
+            gateway_mode: false,
         }
     }
 }
@@ -85,6 +87,11 @@ impl TproxyArgs {
 
     pub fn ipv4_default_route(mut self, enabled: bool) -> Self {
         self.ipv6_default_route = enabled;
+        self
+    }
+
+    pub fn gateway_mode(mut self, gateway_mode: bool) -> Self {
+        self.gateway_mode = gateway_mode;
         self
     }
 }

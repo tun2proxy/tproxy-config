@@ -227,9 +227,76 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         tproxy_removed_done: false,
         restore_ipv4_route: None,
         restore_ipv6_route: None,
+        restore_gateway_mode: None,
+        restore_port_forwarding: false,
     };
 
     flush_dns_cache()?;
+
+    // check for gateway mode
+    if tproxy_args.gateway_mode {
+        // get default interface
+        let (_, default_interface) = get_default_gateway()?;
+
+        // sudo iptables -t nat -A POSTROUTING -o tun10 -j MASQUERADE
+        let args = &["-t", "nat", "-A", "POSTROUTING", "-o", tun_name.as_str(), "-j", "MASQUERADE"];
+        run_command("iptables", args)?;
+
+        // sudo iptables -A FORWARD -i enp0s31f6 -o tun10 -j ACCEPT
+        let args = &[
+            "-A",
+            "FORWARD",
+            "-i",
+            default_interface.as_str(),
+            "-o",
+            tun_name.as_str(),
+            "-j",
+            "ACCEPT",
+        ];
+        run_command("iptables", args)?;
+
+        // sudo iptables -A FORWARD -i tun10 -o enp0s31f6 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        let args = &[
+            "-A",
+            "FORWARD",
+            "-i",
+            tun_name.as_str(),
+            "-o",
+            default_interface.as_str(),
+            "-m",
+            "state",
+            "--state",
+            "RELATED,ESTABLISHED",
+            "-j",
+            "ACCEPT",
+        ];
+        run_command("iptables", args)?;
+
+        // sudo sysctl -w net.ipv4.ip_forward=1
+        run_command("sysctl", &["-w", "net.ipv4.ip_forward=1"])?;
+
+        state.restore_port_forwarding = true;
+        #[cfg(feature = "log")]
+        log::debug!("restore port forwarding: {}", state.restore_port_forwarding);
+
+        let mut restore_gateway_mode = Vec::new();
+
+        // sudo iptables -t nat -D POSTROUTING -o tun10 -j MASQUERADE
+        restore_gateway_mode.push(format!("-t nat -D POSTROUTING -o {}", tun_name));
+
+        // sudo iptables -D FORWARD -i enp0s31f6 -o tun10 -j ACCEPT
+        restore_gateway_mode.push(format!("-D FORWARD -i {} -o {}", default_interface, tun_name));
+
+        // sudo iptables -D FORWARD -i tun10 -o enp0s31f6 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        restore_gateway_mode.push(format!(
+            "-D FORWARD -i {} -o {} -m state --state RELATED,ESTABLISHED",
+            tun_name, default_interface
+        ));
+
+        state.restore_gateway_mode = Some(restore_gateway_mode);
+        #[cfg(feature = "log")]
+        log::debug!("restore gateway mode: {}", state.restore_gateway_mode);
+    }
 
     // sudo ip link set tun0 up
     let args = &["link", "set", tun_name, "up"];
@@ -365,6 +432,30 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
         if let Err(_err) = restore_route(components.as_slice()) {
             #[cfg(feature = "log")]
             log::debug!("restore_route error: {}", _err);
+        }
+    }
+
+    if let Some(gateway_restore) = &state.restore_gateway_mode {
+        for restore in gateway_restore {
+            #[cfg(feature = "log")]
+            log::debug!("restore gateway mode: iptables {}", restore);
+
+            if let Err(_err) = run_command("iptables", &restore.split(' ').collect::<Vec<&str>>()) {
+                #[cfg(feature = "log")]
+                log::debug!("command \"iptables {}\" error: {}", restore, _err);
+            }
+        }
+    }
+
+    if state.restore_port_forwarding {
+        #[cfg(feature = "log")]
+        log::debug!("restore port forwarding");
+
+        // sudo sysctl -w net.ipv4.ip_forward=0
+        let args = &["sysctl", "-w", "net.ipv4.ip_forward=0"];
+        if let Err(_err) = run_command("sysctl", args) {
+            #[cfg(feature = "log")]
+            log::debug!("command \"sysctl {:?}\" error: {}", args, _err);
         }
     }
 

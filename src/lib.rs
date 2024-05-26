@@ -73,6 +73,10 @@ pub struct TproxyState {
     pub(crate) restore_ipv4_route: Option<Vec<String>>,
     #[cfg(target_os = "linux")]
     pub(crate) restore_ipv6_route: Option<Vec<String>>,
+    #[cfg(target_os = "linux")]
+    pub(crate) restore_gateway_mode: Option<Vec<String>>,
+    #[cfg(target_os = "linux")]
+    pub(crate) restore_port_forwarding: bool,
 }
 
 #[allow(dead_code)]
