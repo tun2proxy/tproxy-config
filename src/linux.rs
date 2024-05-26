@@ -229,6 +229,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         restore_ipv6_route: None,
         restore_gateway_mode: None,
         restore_port_forwarding: false,
+        restore_socket_fwmark: None,
     };
 
     flush_dns_cache()?;
@@ -296,6 +297,50 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         state.restore_gateway_mode = Some(restore_gateway_mode);
         #[cfg(feature = "log")]
         log::debug!("restore gateway mode: {}", state.restore_gateway_mode);
+    }
+
+    // check for socket fwmark
+    if let Some(fwmark) = tproxy_args.socket_fwmark {
+        let mark = format!("{}", fwmark);
+        let table = "100";
+
+        // sudo ip rule add fwmark 99 table 2022
+        let args = &["rule", "add", "fwmark", mark.as_str(), "table", table];
+        run_command("ip", args)?;
+
+        // get default interface
+        let (default_ip, default_interface) = get_default_gateway()?;
+        let default_ip = format!("{}", default_ip);
+
+        // sudo ip route flush table 2022
+        let args = &["route", "flush", "table", table];
+        run_command("ip", args)?;
+
+        // sudo ip route add table 100 default via 89.0.142.86 dev tun0
+        let args = &[
+            "route",
+            "add",
+            "table",
+            table,
+            "default",
+            "via",
+            default_ip.as_str(),
+            "dev",
+            default_interface.as_str(),
+        ];
+        run_command("ip", args)?;
+
+        let mut restore_socket_fwmark = Vec::new();
+
+        // sudo ip rule del fwmark 99
+        restore_socket_fwmark.push(format!("rule del fwmark {}", mark.as_str()));
+
+        // sudo ip route del table 2022 default
+        restore_socket_fwmark.push(format!("route del table {} default", table).to_string());
+
+        state.restore_socket_fwmark = Some(restore_socket_fwmark);
+        #[cfg(feature = "log")]
+        log::debug!("restore socket fwmark: {}", state.restore_socket_fwmark);
     }
 
     // sudo ip link set tun0 up
@@ -443,6 +488,18 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
             if let Err(_err) = run_command("iptables", &restore.split(' ').collect::<Vec<&str>>()) {
                 #[cfg(feature = "log")]
                 log::debug!("command \"iptables {}\" error: {}", restore, _err);
+            }
+        }
+    }
+
+    if let Some(fwmark_restore) = &state.restore_socket_fwmark {
+        for restore in fwmark_restore {
+            #[cfg(feature = "log")]
+            log::debug!("restore fwmark: ip {}", restore);
+
+            if let Err(_err) = run_command("ip", &restore.split(' ').collect::<Vec<&str>>()) {
+                #[cfg(feature = "log")]
+                log::debug!("command \"ip {}\" error: {}", restore, _err);
             }
         }
     }

@@ -15,6 +15,7 @@ pub struct TproxyArgs {
     pub ipv4_default_route: bool,
     pub ipv6_default_route: bool,
     pub gateway_mode: bool,
+    pub socket_fwmark: Option<u32>,
 }
 
 impl Default for TproxyArgs {
@@ -31,6 +32,7 @@ impl Default for TproxyArgs {
             ipv4_default_route: true,
             ipv6_default_route: false,
             gateway_mode: false,
+            socket_fwmark: None,
         }
     }
 }
@@ -92,6 +94,11 @@ impl TproxyArgs {
 
     pub fn gateway_mode(mut self, gateway_mode: bool) -> Self {
         self.gateway_mode = gateway_mode;
+        self
+    }
+
+    pub fn socket_fwmark(mut self, socket_fwmark: Option<u32>) -> Self {
+        self.socket_fwmark = socket_fwmark;
         self
     }
 }

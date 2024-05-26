@@ -77,6 +77,8 @@ pub struct TproxyState {
     pub(crate) restore_gateway_mode: Option<Vec<String>>,
     #[cfg(target_os = "linux")]
     pub(crate) restore_port_forwarding: bool,
+    #[cfg(target_os = "linux")]
+    pub(crate) restore_socket_fwmark: Option<Vec<String>>,
 }
 
 #[allow(dead_code)]
