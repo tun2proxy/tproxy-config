@@ -296,7 +296,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
 
         state.restore_gateway_mode = Some(restore_gateway_mode);
         #[cfg(feature = "log")]
-        log::debug!("restore gateway mode: {}", state.restore_gateway_mode);
+        log::debug!("restore gateway mode: {:?}", state.restore_gateway_mode);
     }
 
     // check for socket fwmark
@@ -340,7 +340,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
 
         state.restore_socket_fwmark = Some(restore_socket_fwmark);
         #[cfg(feature = "log")]
-        log::debug!("restore socket fwmark: {}", state.restore_socket_fwmark);
+        log::debug!("restore socket fwmark: {:?}", state.restore_socket_fwmark);
     }
 
     // sudo ip link set tun0 up
