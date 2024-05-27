@@ -99,8 +99,8 @@ impl TproxyArgs {
         self
     }
 
-    pub fn socket_fwmark(mut self, socket_fwmark: u32) -> Self {
-        self.socket_fwmark = Some(socket_fwmark);
+    pub fn socket_fwmark(mut self, socket_fwmark: Option<u32>) -> Self {
+        self.socket_fwmark = socket_fwmark;
         self
     }
 
