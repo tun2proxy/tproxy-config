@@ -1,6 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
 
-use crate::{IpCidr, PROXY_ADDR, TUN_DNS, TUN_GATEWAY, TUN_IPV4, TUN_MTU, TUN_NAME, TUN_NETMASK};
+use crate::{IpCidr, PROXY_ADDR, SOCKET_FWMARK_TABLE, TUN_DNS, TUN_GATEWAY, TUN_IPV4, TUN_MTU, TUN_NAME, TUN_NETMASK};
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct TproxyArgs {
@@ -16,6 +16,7 @@ pub struct TproxyArgs {
     pub ipv6_default_route: bool,
     pub gateway_mode: bool,
     pub socket_fwmark: Option<u32>,
+    pub socket_fwmark_table: String,
 }
 
 impl Default for TproxyArgs {
@@ -33,6 +34,7 @@ impl Default for TproxyArgs {
             ipv6_default_route: false,
             gateway_mode: false,
             socket_fwmark: None,
+            socket_fwmark_table: SOCKET_FWMARK_TABLE.to_string(),
         }
     }
 }
@@ -97,8 +99,13 @@ impl TproxyArgs {
         self
     }
 
-    pub fn socket_fwmark(mut self, socket_fwmark: Option<u32>) -> Self {
-        self.socket_fwmark = socket_fwmark;
+    pub fn socket_fwmark(mut self, socket_fwmark: u32) -> Self {
+        self.socket_fwmark = Some(socket_fwmark);
+        self
+    }
+
+    pub fn socket_fwmark_table(mut self, socket_fwmark_table: &str) -> Self {
+        self.socket_fwmark_table = socket_fwmark_table.to_string();
         self
     }
 }

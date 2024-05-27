@@ -31,11 +31,11 @@ fn bytes_to_lines(bytes: Vec<u8>) -> std::io::Result<Vec<String>> {
     Ok(lines)
 }
 
-fn route_exists(route: &str, ipv6: bool) -> std::io::Result<bool> {
+fn route_exists(route: &str, ipv6: bool, table: &str) -> std::io::Result<bool> {
     let args = if ipv6 {
-        ["-6", "route", "show", route]
+        ["-6", "route", "show", route, "table", table]
     } else {
-        ["-4", "route", "show", route]
+        ["-4", "route", "show", route, "table", table]
     };
     Ok(!bytes_to_string(run_command("ip", &args)?)?.trim().is_empty())
 }
@@ -189,7 +189,7 @@ fn do_bypass_ip(ip: &IpCidr) -> std::io::Result<bool> {
     Ok(false)
 }
 
-pub fn get_restore_components(route: &str) -> std::io::Result<Option<Vec<String>>> {
+pub fn get_route_components(route: &str) -> std::io::Result<Option<Vec<String>>> {
     let cidr_all = IpCidr::from_str(route).unwrap();
     let routes = route_show(cidr_all.is_ipv6())?;
     let default_route = routes.iter().find(|(cidr, _)| cidr == &cidr_all);
@@ -228,7 +228,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         restore_ipv4_route: None,
         restore_ipv6_route: None,
         restore_gateway_mode: None,
-        restore_port_forwarding: false,
+        restore_ip_forwarding: false,
         restore_socket_fwmark: None,
     };
 
@@ -239,11 +239,15 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         // get default interface
         let (_, default_interface) = get_default_gateway()?;
 
-        // sudo iptables -t nat -A POSTROUTING -o tun10 -j MASQUERADE
+        // sudo iptables -P FORWARD DROP
+        let args = &["-P", "FORWARD", "DROP"];
+        run_command("iptables", args)?;
+
+        // sudo iptables -t nat -A POSTROUTING -o "tun_name" -j MASQUERADE
         let args = &["-t", "nat", "-A", "POSTROUTING", "-o", tun_name.as_str(), "-j", "MASQUERADE"];
         run_command("iptables", args)?;
 
-        // sudo iptables -A FORWARD -i enp0s31f6 -o tun10 -j ACCEPT
+        // sudo iptables -A FORWARD -i "default_interface" -o "tun_name" -j ACCEPT
         let args = &[
             "-A",
             "FORWARD",
@@ -256,7 +260,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         ];
         run_command("iptables", args)?;
 
-        // sudo iptables -A FORWARD -i tun10 -o enp0s31f6 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        // sudo iptables -A FORWARD -i "tun_name" -o "default_interface" -m state --state RELATED,ESTABLISHED -j ACCEPT
         let args = &[
             "-A",
             "FORWARD",
@@ -276,23 +280,27 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         // sudo sysctl -w net.ipv4.ip_forward=1
         run_command("sysctl", &["-w", "net.ipv4.ip_forward=1"])?;
 
-        state.restore_port_forwarding = true;
+        state.restore_ip_forwarding = true;
         #[cfg(feature = "log")]
-        log::debug!("restore port forwarding: {}", state.restore_port_forwarding);
+        log::debug!("restore port forwarding: {}", state.restore_ip_forwarding);
 
         let mut restore_gateway_mode = Vec::new();
 
-        // sudo iptables -t nat -D POSTROUTING -o tun10 -j MASQUERADE
+        // sudo iptables -t nat -D POSTROUTING -o "tun_name" -j MASQUERADE
         restore_gateway_mode.push(format!("-t nat -D POSTROUTING -o {}", tun_name));
 
-        // sudo iptables -D FORWARD -i enp0s31f6 -o tun10 -j ACCEPT
+        // sudo iptables -D FORWARD -i "default_interface" -o "tun_name" -j ACCEPT
         restore_gateway_mode.push(format!("-D FORWARD -i {} -o {}", default_interface, tun_name));
 
-        // sudo iptables -D FORWARD -i tun10 -o enp0s31f6 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        // sudo iptables -D FORWARD -i "tun_name" -o "default_interface" -m state --state RELATED,ESTABLISHED -j ACCEPT
         restore_gateway_mode.push(format!(
             "-D FORWARD -i {} -o {} -m state --state RELATED,ESTABLISHED",
             tun_name, default_interface
         ));
+
+        // TODO: check if really need it.
+        // sudo iptables -P FORWARD ACCEPT
+        restore_gateway_mode.push(String::from("-P FORWARD ACCEPT"));
 
         state.restore_gateway_mode = Some(restore_gateway_mode);
         #[cfg(feature = "log")]
@@ -302,43 +310,37 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     // check for socket fwmark
     if let Some(fwmark) = tproxy_args.socket_fwmark {
         let mark = format!("{}", fwmark);
-        let table = "100";
+        let table = tproxy_args.socket_fwmark_table.as_str();
 
-        // sudo ip rule add fwmark 99 table 2022
+        // sudo ip rule add fwmark "mark" table "table"
         let args = &["rule", "add", "fwmark", mark.as_str(), "table", table];
         run_command("ip", args)?;
 
-        // get default interface
-        let (default_ip, default_interface) = get_default_gateway()?;
-        let default_ip = format!("{}", default_ip);
+        // TODO:
+        // need to check really need flush table
+        // or save current default and restore it later or even replace default
+        if route_exists("0.0.0.0/0", false, table)? {
+            // sudo ip route flush table "table"
+            let args = &["route", "flush", "table", table];
+            run_command("ip", args)?;
+        }
 
-        // sudo ip route flush table 2022
-        let args = &["route", "flush", "table", table];
-        run_command("ip", args)?;
-
-        // sudo ip route add table 100 default via 89.0.142.86 dev tun0
-        let args = &[
-            "route",
-            "add",
-            "table",
-            table,
-            "default",
-            "via",
-            default_ip.as_str(),
-            "dev",
-            default_interface.as_str(),
-        ];
-        run_command("ip", args)?;
+        let default_route_components = get_route_components("0.0.0.0/0")?.unwrap();
+        let mut args = vec!["route", "add", "table", table];
+        args.extend(default_route_components.iter().map(|s| s.as_str()));
+        run_command("ip", &args)?;
+        #[cfg(feature = "log")]
+        log::debug!("fwmark default route: ip {}", args.join(" "));
 
         let mut restore_socket_fwmark = Vec::new();
 
-        // sudo ip rule del fwmark 99
-        restore_socket_fwmark.push(format!("rule del fwmark {}", mark.as_str()));
+        // sudo ip rule del fwmark "mark"
+        restore_socket_fwmark.push(format!("rule del fwmark {}", mark));
 
-        // sudo ip route del table 2022 default
-        restore_socket_fwmark.push(format!("route del table {} default", table).to_string());
-
+        // sudo ip route flush table "table"
+        restore_socket_fwmark.push(format!("route flush table {}", table));
         state.restore_socket_fwmark = Some(restore_socket_fwmark);
+
         #[cfg(feature = "log")]
         log::debug!("restore socket fwmark: {:?}", state.restore_socket_fwmark);
     }
@@ -356,7 +358,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     }
 
     if tproxy_args.ipv4_default_route {
-        if !route_exists("0.0.0.0/0", false)? {
+        if !route_exists("0.0.0.0/0", false, "main")? {
             // sudo ip route add 0.0.0.0/0 dev tun0
             let args = &["route", "add", "0.0.0.0/0", "dev", tun_name];
             run_command("ip", args)?;
@@ -372,7 +374,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     } else {
         // If IPv4 is not enabled, we do not want IPv4 traffic to bypass the proxy if a route
         // already exists.
-        state.restore_ipv4_route = get_restore_components("0.0.0.0/0")?;
+        state.restore_ipv4_route = get_route_components("0.0.0.0/0")?;
 
         #[cfg(feature = "log")]
         log::debug!("restore ipv4 route: {:?}", state.restore_ipv4_route);
@@ -384,7 +386,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     }
 
     if tproxy_args.ipv6_default_route {
-        if !route_exists("::/0", true)? {
+        if !route_exists("::/0", true, "main")? {
             // sudo ip route add ::/0 dev tun0
             let args = &["route", "add", "::/0", "dev", tun_name];
             run_command("ip", args)?;
@@ -400,7 +402,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     } else {
         // If IPv6 is not enabled, we do not want IPv6 traffic to bypass the proxy if a route
         // already exists.
-        state.restore_ipv6_route = get_restore_components("::/0")?;
+        state.restore_ipv6_route = get_route_components("::/0")?;
 
         #[cfg(feature = "log")]
         log::debug!("restore ipv6 route: {:?}", state.restore_ipv6_route);
@@ -504,12 +506,12 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
         }
     }
 
-    if state.restore_port_forwarding {
+    if state.restore_ip_forwarding {
         #[cfg(feature = "log")]
-        log::debug!("restore port forwarding");
+        log::debug!("restore ip forwarding");
 
         // sudo sysctl -w net.ipv4.ip_forward=0
-        let args = &["sysctl", "-w", "net.ipv4.ip_forward=0"];
+        let args = &["-w", "net.ipv4.ip_forward=0"];
         if let Err(_err) = run_command("sysctl", args) {
             #[cfg(feature = "log")]
             log::debug!("command \"sysctl {:?}\" error: {}", args, _err);
@@ -572,5 +574,11 @@ mod tests {
         let ip = "123.45.67.89".parse().unwrap();
         let res = do_bypass_ip(&ip);
         println!("do_bypass_ip: {:?}", res);
+    }
+
+    #[test]
+    fn test_route_components() {
+        let components = get_route_components("0.0.0.0/0").unwrap();
+        println!("route_components: {:?}", components);
     }
 }

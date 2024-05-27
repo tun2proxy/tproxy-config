@@ -37,6 +37,7 @@ pub const TUN_IPV4: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 33));
 pub const TUN_NETMASK: IpAddr = IpAddr::V4(Ipv4Addr::new(255, 255, 255, 0));
 pub const TUN_GATEWAY: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
 pub const TUN_DNS: IpAddr = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+pub const SOCKET_FWMARK_TABLE: &str = "100";
 
 #[allow(dead_code)]
 #[cfg(unix)]
@@ -76,7 +77,7 @@ pub struct TproxyState {
     #[cfg(target_os = "linux")]
     pub(crate) restore_gateway_mode: Option<Vec<String>>,
     #[cfg(target_os = "linux")]
-    pub(crate) restore_port_forwarding: bool,
+    pub(crate) restore_ip_forwarding: bool,
     #[cfg(target_os = "linux")]
     pub(crate) restore_socket_fwmark: Option<Vec<String>>,
 }
