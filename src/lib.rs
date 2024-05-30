@@ -4,7 +4,6 @@ mod private_ip;
 mod tproxy_args;
 mod windows;
 
-use std::str::FromStr;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
@@ -59,6 +58,7 @@ pub(crate) fn run_command(command: &str, args: &[&str]) -> std::io::Result<Vec<u
 pub(crate) fn get_state_file_path() -> PathBuf {
     #[cfg(not(target_os = "windows"))]
     {
+        use std::str::FromStr;
         PathBuf::from_str("/var/run/tproxy_config_restore_state.json").unwrap()
     }
 
