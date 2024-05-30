@@ -519,6 +519,8 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
 
     flush_dns_cache()?;
 
+    let _ = std::fs::remove_file(crate::get_state_file_path());
+
     Ok(())
 }
 
