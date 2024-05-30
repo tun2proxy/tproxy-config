@@ -256,14 +256,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         run_command("iptables", args)?;
 
         // sudo iptables -A FORWARD -o "tun_name" -j ACCEPT
-        let args = &[
-            "-A",
-            "FORWARD",
-            "-o",
-            tun_name.as_str(),
-            "-j",
-            "ACCEPT",
-        ];
+        let args = &["-A", "FORWARD", "-o", tun_name.as_str(), "-j", "ACCEPT"];
         run_command("iptables", args)?;
 
         // sudo iptables -A FORWARD -i "tun_name" -o "default_interface" -m state --state RELATED,ESTABLISHED -j ACCEPT
@@ -298,10 +291,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         restore_gateway_mode.push(format!("-D FORWARD -o {} -j ACCEPT", tun_name));
 
         // sudo iptables -D FORWARD -i "tun_name" -m state --state RELATED,ESTABLISHED -j ACCEPT
-        restore_gateway_mode.push(format!(
-            "-D FORWARD -i {} -m state --state RELATED,ESTABLISHED -j ACCEPT",
-            tun_name
-        ));
+        restore_gateway_mode.push(format!("-D FORWARD -i {} -m state --state RELATED,ESTABLISHED -j ACCEPT", tun_name));
 
         state.restore_gateway_mode = Some(restore_gateway_mode);
         #[cfg(feature = "log")]
