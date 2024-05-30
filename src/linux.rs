@@ -62,13 +62,29 @@ fn write_buffer_to_fd(fd: std::os::fd::BorrowedFd<'_>, data: &[u8]) -> std::io::
 }
 
 fn write_nameserver(fd: std::os::fd::BorrowedFd<'_>, tun_gateway: Option<IpAddr>) -> std::io::Result<()> {
-    let tun_gateway = match tun_gateway {
-        Some(gw) => gw,
-        None => "198.18.0.1".parse().unwrap(),
-    };
+    let tun_gateway = tun_gateway.unwrap_or_else(|| "198.18.0.1".parse().unwrap());
     let data = format!("nameserver {}\n", tun_gateway);
     nix::sys::stat::fchmod(fd.as_raw_fd(), nix::sys::stat::Mode::from_bits(0o444).unwrap())?;
     write_buffer_to_fd(fd, data.as_bytes())?;
+    Ok(())
+}
+
+fn ip_forwarding_file_path(ipv6: bool) -> &'static str {
+    if ipv6 {
+        "/proc/sys/net/ipv6/conf/all/forwarding"
+    } else {
+        "/proc/sys/net/ipv4/ip_forward"
+    }
+}
+
+fn ip_fowarding_enabled(ipv6: bool) -> std::io::Result<bool> {
+    let path = ip_forwarding_file_path(ipv6);
+    Ok(bytes_to_string(fs::read(path)?)?.trim() == "1")
+}
+
+fn configure_ip_forwarding(ipv6: bool, enable: bool) -> std::io::Result<()> {
+    let path = ip_forwarding_file_path(ipv6);
+    fs::write(path, if enable { "1\n" } else { "0\n" })?;
     Ok(())
 }
 
@@ -189,15 +205,14 @@ fn do_bypass_ip(ip: &IpCidr) -> std::io::Result<bool> {
     Ok(false)
 }
 
-pub fn get_route_components(route: &str) -> std::io::Result<Option<Vec<String>>> {
-    let cidr_all = IpCidr::from_str(route).unwrap();
-    let routes = route_show(cidr_all.is_ipv6())?;
-    let default_route = routes.iter().find(|(cidr, _)| cidr == &cidr_all);
-    match default_route {
+pub fn get_route_components(cidr: &IpCidr) -> std::io::Result<Option<Vec<String>>> {
+    let routes = route_show(cidr.is_ipv6())?;
+    let matching_route = routes.iter().find(|(search_cidr, _)| search_cidr == cidr);
+    match matching_route {
         None => Ok(None),
         Some((_, components)) => {
             let mut vec = Vec::new();
-            vec.push(String::from(route));
+            vec.push(cidr.to_string());
             vec.extend(components.clone());
             Ok(Some(vec))
         }
@@ -236,23 +251,14 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
 
     // check for gateway mode
     if tproxy_args.gateway_mode {
-        // get default interface
-        let (_, default_interface) = get_default_gateway()?;
-
-        // sudo iptables -P FORWARD DROP
-        let args = &["-P", "FORWARD", "DROP"];
-        run_command("iptables", args)?;
-
         // sudo iptables -t nat -A POSTROUTING -o "tun_name" -j MASQUERADE
         let args = &["-t", "nat", "-A", "POSTROUTING", "-o", tun_name.as_str(), "-j", "MASQUERADE"];
         run_command("iptables", args)?;
 
-        // sudo iptables -A FORWARD -i "default_interface" -o "tun_name" -j ACCEPT
+        // sudo iptables -A FORWARD -o "tun_name" -j ACCEPT
         let args = &[
             "-A",
             "FORWARD",
-            "-i",
-            default_interface.as_str(),
             "-o",
             tun_name.as_str(),
             "-j",
@@ -266,8 +272,6 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
             "FORWARD",
             "-i",
             tun_name.as_str(),
-            "-o",
-            default_interface.as_str(),
             "-m",
             "state",
             "--state",
@@ -277,30 +281,27 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         ];
         run_command("iptables", args)?;
 
-        // sudo sysctl -w net.ipv4.ip_forward=1
-        run_command("sysctl", &["-w", "net.ipv4.ip_forward=1"])?;
+        if !ip_fowarding_enabled(false)? {
+            #[cfg(feature = "log")]
+            log::debug!("IP forwarding not enabled");
+            configure_ip_forwarding(false, true)?;
 
-        state.restore_ip_forwarding = true;
-        #[cfg(feature = "log")]
-        log::debug!("restore port forwarding: {}", state.restore_ip_forwarding);
+            state.restore_ip_forwarding = true;
+        }
 
         let mut restore_gateway_mode = Vec::new();
 
         // sudo iptables -t nat -D POSTROUTING -o "tun_name" -j MASQUERADE
-        restore_gateway_mode.push(format!("-t nat -D POSTROUTING -o {}", tun_name));
+        restore_gateway_mode.push(format!("-t nat -D POSTROUTING -o {} -j MASQUERADE", tun_name));
 
-        // sudo iptables -D FORWARD -i "default_interface" -o "tun_name" -j ACCEPT
-        restore_gateway_mode.push(format!("-D FORWARD -i {} -o {}", default_interface, tun_name));
+        // sudo iptables -D FORWARD -o "tun_name" -j ACCEPT
+        restore_gateway_mode.push(format!("-D FORWARD -o {} -j ACCEPT", tun_name));
 
-        // sudo iptables -D FORWARD -i "tun_name" -o "default_interface" -m state --state RELATED,ESTABLISHED -j ACCEPT
+        // sudo iptables -D FORWARD -i "tun_name" -m state --state RELATED,ESTABLISHED -j ACCEPT
         restore_gateway_mode.push(format!(
-            "-D FORWARD -i {} -o {} -m state --state RELATED,ESTABLISHED",
-            tun_name, default_interface
+            "-D FORWARD -i {} -m state --state RELATED,ESTABLISHED -j ACCEPT",
+            tun_name
         ));
-
-        // TODO: check if really need it.
-        // sudo iptables -P FORWARD ACCEPT
-        restore_gateway_mode.push(String::from("-P FORWARD ACCEPT"));
 
         state.restore_gateway_mode = Some(restore_gateway_mode);
         #[cfg(feature = "log")]
@@ -316,16 +317,11 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         let args = &["rule", "add", "fwmark", mark.as_str(), "table", table];
         run_command("ip", args)?;
 
-        // TODO:
-        // need to check really need flush table
-        // or save current default and restore it later or even replace default
-        if route_exists("0.0.0.0/0", false, table)? {
-            // sudo ip route flush table "table"
-            let args = &["route", "flush", "table", table];
-            run_command("ip", args)?;
-        }
+        // Flush the fwmark table. We just claim that table.
+        let args = &["route", "flush", "table", table];
+        let _ = run_command("ip", args);
 
-        let default_route_components = get_route_components("0.0.0.0/0")?.unwrap();
+        let default_route_components = get_route_components(&IpCidr::from_str("0.0.0.0/0").unwrap())?.unwrap();
         let mut args = vec!["route", "add", "table", table];
         args.extend(default_route_components.iter().map(|s| s.as_str()));
         run_command("ip", &args)?;
@@ -374,7 +370,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     } else {
         // If IPv4 is not enabled, we do not want IPv4 traffic to bypass the proxy if a route
         // already exists.
-        state.restore_ipv4_route = get_route_components("0.0.0.0/0")?;
+        state.restore_ipv4_route = get_route_components(&IpCidr::from_str("0.0.0.0/0").unwrap())?;
 
         #[cfg(feature = "log")]
         log::debug!("restore ipv4 route: {:?}", state.restore_ipv4_route);
@@ -402,7 +398,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     } else {
         // If IPv6 is not enabled, we do not want IPv6 traffic to bypass the proxy if a route
         // already exists.
-        state.restore_ipv6_route = get_route_components("::/0")?;
+        state.restore_ipv6_route = get_route_components(&IpCidr::from_str("::/0").unwrap())?;
 
         #[cfg(feature = "log")]
         log::debug!("restore ipv6 route: {:?}", state.restore_ipv6_route);
@@ -510,11 +506,9 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
         #[cfg(feature = "log")]
         log::debug!("restore ip forwarding");
 
-        // sudo sysctl -w net.ipv4.ip_forward=0
-        let args = &["-w", "net.ipv4.ip_forward=0"];
-        if let Err(_err) = run_command("sysctl", args) {
+        if let Err(_err) = configure_ip_forwarding(false, false) {
             #[cfg(feature = "log")]
-            log::debug!("command \"sysctl {:?}\" error: {}", args, _err);
+            log::debug!("error restoring IP forwarding: {}", _err);
         }
     }
 
@@ -578,7 +572,7 @@ mod tests {
 
     #[test]
     fn test_route_components() {
-        let components = get_route_components("0.0.0.0/0").unwrap();
+        let components = get_route_components(&IpCidr::from_str("0.0.0.0/0").unwrap()).unwrap();
         println!("route_components: {:?}", components);
     }
 }
