@@ -56,12 +56,18 @@ pub(crate) fn run_command(command: &str, args: &[&str]) -> std::io::Result<Vec<u
 
 #[allow(dead_code)]
 pub(crate) fn get_state_file_path() -> PathBuf {
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         use std::str::FromStr;
         PathBuf::from_str("/var/run/tproxy_config_restore_state.json").unwrap()
     }
-
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var("XDG_RUNTIME_DIR")
+            .map(|s| PathBuf::from(s).join("tproxy_config_restore_state.json"))
+            .unwrap_or_else(|_| std::env::temp_dir().join("tproxy_config_restore_state.json"))
+        // use `$XDG_RUNTIME_DIR`, usually `/run/user/$UID`, if not set, fail back to`/tmp`
+    }
     #[cfg(target_os = "windows")]
     {
         let temp_dir = std::env::temp_dir();
