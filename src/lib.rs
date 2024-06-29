@@ -4,10 +4,7 @@ mod private_ip;
 mod tproxy_args;
 mod windows;
 
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::PathBuf,
-};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 pub use {private_ip::is_private_ip, tproxy_args::TproxyArgs};
 
 pub use cidr::IpCidr;
@@ -55,22 +52,7 @@ pub(crate) fn run_command(command: &str, args: &[&str]) -> std::io::Result<Vec<u
 }
 
 #[allow(dead_code)]
-pub(crate) fn get_state_file_path() -> PathBuf {
-    #[cfg(not(target_os = "windows"))]
-    {
-        use std::str::FromStr;
-        PathBuf::from_str("/var/run/tproxy_config_restore_state.json").unwrap()
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let temp_dir = std::env::temp_dir();
-        temp_dir.join("tproxy_config_restore_state.json")
-    }
-}
-
-#[allow(dead_code)]
-#[derive(serde::Serialize, serde::Deserialize, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct TproxyState {
     pub(crate) tproxy_args: Option<TproxyArgs>,
     pub(crate) original_dns_servers: Option<Vec<IpAddr>>,
@@ -89,23 +71,6 @@ pub struct TproxyState {
     pub(crate) restore_ip_forwarding: bool,
     #[cfg(target_os = "linux")]
     pub(crate) restore_socket_fwmark: Option<Vec<String>>,
-}
-
-#[allow(dead_code)]
-pub(crate) fn store_intermediate_state(state: &TproxyState) -> std::io::Result<()> {
-    let contents = serde_json::to_string(&state)?;
-    std::fs::write(crate::get_state_file_path(), contents)?;
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub(crate) fn retrieve_intermediate_state() -> std::io::Result<TproxyState> {
-    let path = crate::get_state_file_path();
-    if !path.exists() {
-        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No state file found"));
-    }
-    let s = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str::<TproxyState>(&s)?)
 }
 
 /// Compare two version strings

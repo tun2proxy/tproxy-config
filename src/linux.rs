@@ -401,7 +401,6 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
 
     setup_resolv_conf(&mut state)?;
 
-    crate::store_intermediate_state(&state)?;
     Ok(state)
 }
 
@@ -410,7 +409,7 @@ impl Drop for TproxyState {
         #[cfg(feature = "log")]
         log::debug!("restoring network settings");
 
-        if let Err(_e) = _tproxy_remove(self) {
+        if let Err(_e) = tproxy_remove(self) {
             let _pid = std::process::id();
             #[cfg(feature = "log")]
             log::error!("Current process \"{}\" failed to restore network settings: {}", _pid, _e);
@@ -418,15 +417,7 @@ impl Drop for TproxyState {
     }
 }
 
-pub fn tproxy_remove(state: Option<TproxyState>) -> std::io::Result<()> {
-    let mut state = match state {
-        Some(state) => state,
-        None => crate::retrieve_intermediate_state()?,
-    };
-    _tproxy_remove(&mut state)
-}
-
-pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
+pub fn tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     if state.tproxy_removed_done {
         return Ok(());
     }
@@ -518,8 +509,6 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     }
 
     flush_dns_cache()?;
-
-    let _ = std::fs::remove_file(crate::get_state_file_path());
 
     Ok(())
 }
