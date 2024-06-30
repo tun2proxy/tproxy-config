@@ -4,10 +4,7 @@ mod private_ip;
 mod tproxy_args;
 mod windows;
 
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::PathBuf,
-};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 pub use {private_ip::is_private_ip, tproxy_args::TproxyArgs};
 
 pub use cidr::IpCidr;
@@ -55,18 +52,10 @@ pub(crate) fn run_command(command: &str, args: &[&str]) -> std::io::Result<Vec<u
 }
 
 #[allow(dead_code)]
-pub(crate) fn get_state_file_path() -> PathBuf {
-    #[cfg(not(target_os = "windows"))]
-    {
-        use std::str::FromStr;
-        PathBuf::from_str("/var/run/tproxy_config_restore_state.json").unwrap()
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let temp_dir = std::env::temp_dir();
-        temp_dir.join("tproxy_config_restore_state.json")
-    }
+#[cfg(feature = "unsafe-state-file")]
+pub(crate) fn get_state_file_path() -> std::path::PathBuf {
+    let temp_dir = std::env::temp_dir();
+    temp_dir.join("tproxy_config_restore_state.json")
 }
 
 #[allow(dead_code)]
@@ -92,6 +81,7 @@ pub struct TproxyState {
 }
 
 #[allow(dead_code)]
+#[cfg(feature = "unsafe-state-file")]
 pub(crate) fn store_intermediate_state(state: &TproxyState) -> std::io::Result<()> {
     let contents = serde_json::to_string(&state)?;
     std::fs::write(crate::get_state_file_path(), contents)?;
@@ -99,6 +89,7 @@ pub(crate) fn store_intermediate_state(state: &TproxyState) -> std::io::Result<(
 }
 
 #[allow(dead_code)]
+#[cfg(feature = "unsafe-state-file")]
 pub(crate) fn retrieve_intermediate_state() -> std::io::Result<TproxyState> {
     let path = crate::get_state_file_path();
     if !path.exists() {

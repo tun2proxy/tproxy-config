@@ -85,6 +85,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         restore_resolvconf_content: None,
         tproxy_removed_done: false,
     };
+    #[cfg(feature = "unsafe-state-file")]
     crate::store_intermediate_state(&state)?;
 
     Ok(state)
@@ -100,11 +101,16 @@ impl Drop for TproxyState {
 }
 
 pub fn tproxy_remove(state: Option<TproxyState>) -> std::io::Result<()> {
-    let mut state = match state {
-        Some(state) => state,
-        None => crate::retrieve_intermediate_state()?,
-    };
-    _tproxy_remove(&mut state)
+    match state {
+        Some(mut state) => _tproxy_remove(&mut state),
+        None => {
+            #[cfg(feature = "unsafe-state-file")]
+            if let Ok(mut state) = crate::retrieve_intermediate_state() {
+                _tproxy_remove(&mut state)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
@@ -177,6 +183,7 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     writeln!(writer, "nameserver {}\n", original_gateway)?;
 
     // remove the record file anyway
+    #[cfg(feature = "unsafe-state-file")]
     let _ = std::fs::remove_file(crate::get_state_file_path());
 
     flush_dns_cache()?;
