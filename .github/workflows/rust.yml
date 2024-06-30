@@ -28,7 +28,10 @@ jobs:
       run: cargo clippy --all-targets --all-features -- -D warnings
     - name: Build
       if: ${{ !cancelled() }}
-      run: cargo build --verbose --tests --all-features
+      run: |
+          cargo build --verbose --tests --no-default-features
+          cargo clean
+          cargo build --verbose --tests --all-features
     - name: Test
       if: ${{ !cancelled() }}
       run: cargo test --verbose --tests --all-features
