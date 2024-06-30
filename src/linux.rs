@@ -107,13 +107,11 @@ fn setup_resolv_conf(restore: &mut TproxyState) -> std::io::Result<()> {
         restore.umount_resolvconf = true;
         let flags = nix::mount::MsFlags::MS_REMOUNT | nix::mount::MsFlags::MS_RDONLY | nix::mount::MsFlags::MS_BIND;
         if nix::mount::mount("".into(), ETC_RESOLV_CONF_FILE, "".into(), flags, "".into()).is_err() {
-            #[cfg(feature = "log")]
             log::warn!("failed to remount /etc/resolv.conf as readonly");
         }
     }
     drop(file);
     if mount1.is_err() {
-        #[cfg(feature = "log")]
         log::warn!("failed to bind mount custom resolv.conf onto /etc/resolv.conf, resorting to direct write");
 
         restore.restore_resolvconf_content = Some(fs::read(ETC_RESOLV_CONF_FILE)?);
@@ -275,7 +273,6 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         run_command("iptables", args)?;
 
         if !ip_fowarding_enabled(false)? {
-            #[cfg(feature = "log")]
             log::debug!("IP forwarding not enabled");
             configure_ip_forwarding(false, true)?;
 
@@ -294,7 +291,6 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         restore_gateway_mode.push(format!("-D FORWARD -i {} -m state --state RELATED,ESTABLISHED -j ACCEPT", tun_name));
 
         state.restore_gateway_mode = Some(restore_gateway_mode);
-        #[cfg(feature = "log")]
         log::debug!("restore gateway mode: {:?}", state.restore_gateway_mode);
     }
 
@@ -315,7 +311,6 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         let mut args = vec!["route", "add", "table", table];
         args.extend(default_route_components.iter().map(|s| s.as_str()));
         run_command("ip", &args)?;
-        #[cfg(feature = "log")]
         log::debug!("fwmark default route: ip {}", args.join(" "));
 
         let mut restore_socket_fwmark = Vec::new();
@@ -327,7 +322,6 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         restore_socket_fwmark.push(format!("route flush table {}", table));
         state.restore_socket_fwmark = Some(restore_socket_fwmark);
 
-        #[cfg(feature = "log")]
         log::debug!("restore socket fwmark: {:?}", state.restore_socket_fwmark);
     }
 
@@ -362,11 +356,9 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         // already exists.
         state.restore_ipv4_route = get_route_components(&IpCidr::from_str("0.0.0.0/0").unwrap())?;
 
-        #[cfg(feature = "log")]
         log::debug!("restore ipv4 route: {:?}", state.restore_ipv4_route);
 
         if let Err(_err) = run_command("ip", &["route", "del", "0.0.0.0/0"]) {
-            #[cfg(feature = "log")]
             log::debug!("command \"ip route del 0.0.0.0/0\" error: {}", _err);
         }
     }
@@ -390,11 +382,9 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         // already exists.
         state.restore_ipv6_route = get_route_components(&IpCidr::from_str("::/0").unwrap())?;
 
-        #[cfg(feature = "log")]
         log::debug!("restore ipv6 route: {:?}", state.restore_ipv6_route);
 
         if let Err(_err) = run_command("ip", &["route", "del", "::/0"]) {
-            #[cfg(feature = "log")]
             log::debug!("command \"ip route del ::/0\" error: {}", _err);
         }
     }
@@ -407,12 +397,10 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
 
 impl Drop for TproxyState {
     fn drop(&mut self) {
-        #[cfg(feature = "log")]
         log::debug!("restoring network settings");
 
         if let Err(_e) = _tproxy_remove(self) {
             let _pid = std::process::id();
-            #[cfg(feature = "log")]
             log::error!("Current process \"{}\" failed to restore network settings: {}", _pid, _e);
         }
     }
@@ -437,7 +425,6 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     for bypass_ip in tproxy_args.bypass_ips.iter() {
         let args = &["route", "del", &bypass_ip.to_string()];
         if let Err(_err) = run_command("ip", args) {
-            #[cfg(feature = "log")]
             log::debug!("command \"ip route del {}\" error: {}", bypass_ip, _err);
         }
     }
@@ -445,36 +432,29 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
         let bypass_ip = IpCidr::new_host(tproxy_args.proxy_addr.ip());
         let args = &["route", "del", &bypass_ip.to_string()];
         if let Err(_err) = run_command("ip", args) {
-            #[cfg(feature = "log")]
             log::debug!("command \"ip route del {}\" error: {}", bypass_ip, _err);
         }
     }
 
     if let Some(components) = &state.restore_ipv4_route {
-        #[cfg(feature = "log")]
         log::debug!("restore route: {:?}", components);
         if let Err(_err) = restore_route(components.as_slice()) {
-            #[cfg(feature = "log")]
             log::debug!("restore_route error: {}", _err);
         }
     }
 
     if let Some(components) = &state.restore_ipv6_route {
-        #[cfg(feature = "log")]
         log::debug!("restore route: {:?}", components);
         if let Err(_err) = restore_route(components.as_slice()) {
-            #[cfg(feature = "log")]
             log::debug!("restore_route error: {}", _err);
         }
     }
 
     if let Some(gateway_restore) = &state.restore_gateway_mode {
         for restore in gateway_restore {
-            #[cfg(feature = "log")]
             log::debug!("restore gateway mode: iptables {}", restore);
 
             if let Err(_err) = run_command("iptables", &restore.split(' ').collect::<Vec<&str>>()) {
-                #[cfg(feature = "log")]
                 log::debug!("command \"iptables {}\" error: {}", restore, _err);
             }
         }
@@ -482,22 +462,18 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
 
     if let Some(fwmark_restore) = &state.restore_socket_fwmark {
         for restore in fwmark_restore {
-            #[cfg(feature = "log")]
             log::debug!("restore fwmark: ip {}", restore);
 
             if let Err(_err) = run_command("ip", &restore.split(' ').collect::<Vec<&str>>()) {
-                #[cfg(feature = "log")]
                 log::debug!("command \"ip {}\" error: {}", restore, _err);
             }
         }
     }
 
     if state.restore_ip_forwarding {
-        #[cfg(feature = "log")]
         log::debug!("restore ip forwarding");
 
         if let Err(_err) = configure_ip_forwarding(false, false) {
-            #[cfg(feature = "log")]
             log::debug!("error restoring IP forwarding: {}", _err);
         }
     }
@@ -505,7 +481,6 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     // sudo ip link del tun0
     let args = &["link", "del", &tproxy_args.tun_name];
     if let Err(_err) = run_command("ip", args) {
-        #[cfg(feature = "log")]
         log::debug!("command \"ip {:?}\" error: {}", args, _err);
     }
 

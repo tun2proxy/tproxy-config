@@ -92,10 +92,8 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
 
 impl Drop for TproxyState {
     fn drop(&mut self) {
-        #[cfg(feature = "log")]
         log::debug!("restoring network settings");
         if let Err(_e) = _tproxy_remove(self) {
-            #[cfg(feature = "log")]
             log::error!("failed to restore network settings: {}", _e);
         }
     }
@@ -122,12 +120,10 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     let original_gw_scope = state.gw_scope.take().ok_or(err)?;
 
     if let Err(_err) = configure_system_proxy(false, None, None) {
-        #[cfg(feature = "log")]
         log::debug!("configure_system_proxy error: {}", _err);
     }
     if !original_dns_servers.is_empty() {
         if let Err(_err) = configure_dns_servers(&original_dns_servers) {
-            #[cfg(feature = "log")]
             log::debug!("restore original dns servers error: {}", _err);
         }
     }
@@ -150,15 +146,12 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     // route delete default -ifscope original_gw_scope
     // route add default original_gateway
     if let Err(_err) = run_command("route", &["delete", "default"]) {
-        #[cfg(feature = "log")]
         log::debug!("command \"route delete default\" error: {}", _err);
     }
     if let Err(_err) = run_command("route", &["delete", "default", "-ifscope", &original_gw_scope]) {
-        #[cfg(feature = "log")]
         log::debug!("command \"route delete default -ifscope {}\" error: {}", original_gw_scope, _err);
     }
     if let Err(_err) = run_command("route", &["add", "default", &original_gateway]) {
-        #[cfg(feature = "log")]
         log::debug!("command \"route add default {}\" error: {}", original_gateway, _err);
     }
 

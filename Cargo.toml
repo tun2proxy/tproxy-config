@@ -11,11 +11,10 @@ readme = "readme.md"
 
 [features]
 default = []
-log = ["dep:log"]
 
 [dependencies]
 cidr = { version = "0.2", features = ["serde"] }
-log = { version = "0.4", optional = true }
+log = { version = "0.4" }
 regex = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
