@@ -138,8 +138,8 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
                 log::debug!("restore original dns servers error: {}", _err);
             }
         } else if let Err(_err) = config_dns_servers_empty(&original_gw_scope) {
-                log::debug!("restore original dns servers error: {}", _err);
-            }
+            log::debug!("restore original dns servers error: {}", _err);
+        }
     }
 
     let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
