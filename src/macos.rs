@@ -13,6 +13,8 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
 
     // 0. Save the original gateway and scope
     let (original_gateway_0, orig_gw_iface) = get_default_gateway()?;
+    let dns_servers_if_exist_from_interface = get_dns_servers_if_exist_from_interface(&orig_gw_iface).is_ok();
+
     let original_gateway = original_gateway_0.to_string();
     let original_dns_servers = dns_servers_from_etc_resolv_conf_file()?;
 
@@ -79,6 +81,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     let state = TproxyState {
         tproxy_args: Some(tproxy_args.clone()),
         original_dns_servers: Some(original_dns_servers),
+        dns_servers_if_exist_from_interface,
         gateway: Some(original_gateway_0),
         gw_scope: Some(orig_gw_iface),
         umount_resolvconf: false,
@@ -119,6 +122,7 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     }
     state.tproxy_removed_done = true;
     let original_dns_servers = state.original_dns_servers.take().unwrap_or_default();
+    let dns_servers_if_exist_from_interface = state.dns_servers_if_exist_from_interface;
 
     let err = std::io::Error::new(std::io::ErrorKind::Other, "No original gateway found");
     let original_gateway = state.gateway.take().ok_or(err)?.to_string();
@@ -129,8 +133,14 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
         log::debug!("configure_system_proxy error: {}", _err);
     }
     if !original_dns_servers.is_empty() {
-        if let Err(_err) = configure_dns_servers(&original_dns_servers) {
-            log::debug!("restore original dns servers error: {}", _err);
+        if dns_servers_if_exist_from_interface {
+            if let Err(_err) = configure_dns_servers(&original_dns_servers) {
+                log::debug!("restore original dns servers error: {}", _err);
+            }
+        } else {
+            if let Err(_err) = config_dns_servers_empty(&original_gw_scope) {
+                log::debug!("restore original dns servers error: {}", _err);
+            }
         }
     }
 
@@ -245,6 +255,18 @@ pub(crate) fn configure_dns_servers(dns_servers: &[IpAddr]) -> std::io::Result<(
     Ok(())
 }
 
+fn config_dns_servers_empty(original_gw_scope: &str) -> std::io::Result<()> {
+    let script = format!(
+        r#"
+    original_gw_scope={}
+    networksetup -setdnsservers "$original_gw_scope" empty
+    "#,
+        original_gw_scope
+    );
+    let _r = run_command("sh", &["-c", &script])?;
+    Ok(())
+}
+
 fn dns_servers_from_etc_resolv_conf_file() -> std::io::Result<Vec<IpAddr>> {
     let mut buf = Vec::with_capacity(4096);
     let mut f = std::fs::File::open(ETC_RESOLV_CONF_FILE)?;
@@ -256,6 +278,30 @@ fn dns_servers_from_etc_resolv_conf_file() -> std::io::Result<Vec<IpAddr>> {
         dns_servers.push(name_server.into());
     }
     Ok(dns_servers)
+}
+
+fn get_dns_servers_if_exist_from_interface(original_gw_scope: &str) -> std::io::Result<()> {
+    let script = format!(
+        r#"
+    original_gw_scope={}
+    dnsservers=$(networksetup -getdnsservers "$original_gw_scope")
+    while read line; do
+          echo $line | grep 'DNS Servers' > /dev/null 2>&1
+          rc="$?"
+          if [ "$rc" -eq 0 ]; then
+              dnsnotset=0
+              exit 1
+          fi
+    done <<< "$(echo "$dnsservers")"
+
+    if [ -z "$dnsnotset" ]; then
+        >&2 echo "DNS servers exist"
+    fi
+    "#,
+        original_gw_scope
+    );
+    let _r = run_command("sh", &["-c", &script])?;
+    Ok(())
 }
 
 fn configure_system_proxy(state: bool, http_proxy: Option<SocketAddr>, socks_proxy: Option<SocketAddr>) -> std::io::Result<()> {

@@ -63,6 +63,8 @@ pub(crate) fn get_state_file_path() -> std::path::PathBuf {
 pub struct TproxyState {
     pub(crate) tproxy_args: Option<TproxyArgs>,
     pub(crate) original_dns_servers: Option<Vec<IpAddr>>,
+    #[cfg(target_os = "macos")]
+    pub(crate) dns_servers_if_exist_from_interface: bool,
     pub(crate) gateway: Option<IpAddr>,
     pub(crate) gw_scope: Option<String>,
     pub(crate) umount_resolvconf: bool,
