@@ -282,7 +282,8 @@ fn get_dns_servers_if_exist_from_interface(original_gw_scope: &str) -> std::io::
     let script = format!(
         r#"
     original_gw_scope={}
-    dnsservers=$(networksetup -getdnsservers "$original_gw_scope")
+    currentservice=$(networksetup -listnetworkserviceorder | grep -B 1 "$original_gw_scope" | head -n 1 | sed 's/.*) //')
+    dnsservers=$(networksetup -getdnsservers "$currentservice")
     while read line; do
           echo $line | grep 'DNS Servers' > /dev/null 2>&1
           rc="$?"
