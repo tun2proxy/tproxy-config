@@ -78,6 +78,10 @@ pub struct TproxyState {
     pub(crate) restore_ip_forwarding: bool,
     #[cfg(target_os = "linux")]
     pub(crate) restore_socket_fwmark: Option<Vec<String>>,
+    #[cfg(target_os = "macos")]
+    pub(crate) default_service_id: Option<String>,
+    #[cfg(target_os = "macos")]
+    pub(crate) default_service_dns: Option<Vec<IpAddr>>,
 }
 
 #[allow(dead_code)]

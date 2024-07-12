@@ -1,20 +1,26 @@
 #![cfg(target_os = "macos")]
 
 use cidr::IpCidr;
+use system_configuration::{
+    core_foundation::{
+        array::CFArray,
+        base::TCFType,
+        dictionary::CFDictionary,
+        propertylist::{CFPropertyList, CFPropertyListSubClass},
+        string::CFString,
+    },
+    dynamic_store::SCDynamicStoreBuilder,
+};
 
 use crate::{run_command, TproxyArgs, TproxyState, ETC_RESOLV_CONF_FILE};
-use std::{
-    net::{IpAddr, SocketAddr},
-    str::FromStr,
-};
+use std::{net::IpAddr, str::FromStr};
 
 pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     flush_dns_cache()?;
 
     // 0. Save the original gateway and scope
-    let (original_gateway_0, orig_gw_iface) = get_default_gateway()?;
+    let (original_gateway_0, orig_gw_iface, service_id) = get_default_iface_params()?;
     let original_gateway = original_gateway_0.to_string();
-    let original_dns_servers = dns_servers_from_etc_resolv_conf_file()?;
 
     let tun_ip = tproxy_args.tun_ip.to_string();
     let tun_netmask = tproxy_args.tun_netmask.to_string();
@@ -63,6 +69,16 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     run_command("route", args)?;
     // */
 
+    let dns_servers = match get_dns_servers(&service_id) {
+        Ok(servers) => servers,
+        Err(msg) => {
+            log::error!("failed to get DNS servers of default interface: {}", msg);
+            None
+        }
+    };
+
+    let restore_resolvconf_content = Some(std::fs::read(ETC_RESOLV_CONF_FILE)?);
+
     // 5. Set the DNS server to the gateway of the interface
     {
         // Command: `sudo sh -c "echo nameserver 10.0.0.1 > /etc/resolv.conf"`
@@ -71,20 +87,23 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         use std::io::Write;
         writeln!(writer, "nameserver {}\n", tun_gateway)?;
 
-        configure_dns_servers(&[tproxy_args.tun_gateway])?;
+        configure_dns_servers(&service_id, &[tproxy_args.tun_gateway])?;
     }
-
-    configure_system_proxy(true, None, Some(tproxy_args.proxy_addr))?;
 
     let state = TproxyState {
         tproxy_args: Some(tproxy_args.clone()),
-        original_dns_servers: Some(original_dns_servers),
+        original_dns_servers: None,
         gateway: Some(original_gateway_0),
         gw_scope: Some(orig_gw_iface),
         umount_resolvconf: false,
-        restore_resolvconf_content: None,
+        restore_resolvconf_content,
         tproxy_removed_done: false,
+        default_service_id: Some(service_id),
+        default_service_dns: dns_servers,
     };
+
+    log::debug!("resolvconf content {:?}", state.restore_resolvconf_content);
+
     #[cfg(feature = "unsafe-state-file")]
     crate::store_intermediate_state(&state)?;
 
@@ -118,19 +137,19 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
         return Ok(());
     }
     state.tproxy_removed_done = true;
-    let original_dns_servers = state.original_dns_servers.take().unwrap_or_default();
 
     let err = std::io::Error::new(std::io::ErrorKind::Other, "No original gateway found");
     let original_gateway = state.gateway.take().ok_or(err)?.to_string();
     let err = std::io::Error::new(std::io::ErrorKind::Other, "No original gateway scope found");
     let original_gw_scope = state.gw_scope.take().ok_or(err)?;
 
-    if let Err(_err) = configure_system_proxy(false, None, None) {
-        log::debug!("configure_system_proxy error: {}", _err);
-    }
-    if !original_dns_servers.is_empty() {
-        if let Err(_err) = configure_dns_servers(&original_dns_servers) {
-            log::debug!("restore original dns servers error: {}", _err);
+    if let Some(service_id) = &state.default_service_id {
+        if let Some(original_dns_servers) = &state.default_service_dns {
+            if let Err(_err) = configure_dns_servers(service_id, original_dns_servers.as_slice()) {
+                log::debug!("restore original dns servers error: {}", _err);
+            }
+        } else {
+            remove_dns_servers(service_id);
         }
     }
 
@@ -161,26 +180,9 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
         log::debug!("command \"route add default {}\" error: {}", original_gateway, _err);
     }
 
-    /*
-    let unspecified = Ipv4Addr::UNSPECIFIED.to_string();
-
-    // 1. Remove current adapter's route
-    // command: `sudo route delete 0.0.0.0`
-    let args = &["delete", &unspecified];
-    run_command("route", args)?;
-
-    // 2. Add back the original gateway route
-    // command: `sudo route add -net 0.0.0.0 original_gateway`
-    let args = &["add", "-net", &unspecified, &original_gateway];
-    run_command("route", args)?;
-    // */
-
-    // 3. Restore DNS server to the original gateway
-    // command: `sudo sh -c "echo nameserver original_gateway > /etc/resolv.conf"`
-    let file = std::fs::OpenOptions::new().write(true).truncate(true).open(ETC_RESOLV_CONF_FILE)?;
-    let mut writer = std::io::BufWriter::new(file);
-    use std::io::Write;
-    writeln!(writer, "nameserver {}\n", original_gateway)?;
+    if let Some(data) = &state.restore_resolvconf_content {
+        std::fs::write(ETC_RESOLV_CONF_FILE, data)?;
+    }
 
     // remove the record file anyway
     #[cfg(feature = "unsafe-state-file")]
@@ -191,138 +193,110 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn get_default_gateway() -> std::io::Result<(IpAddr, String)> {
-    let script = r#"
-    gateway=$(route -n get default | awk '/gateway:/{print $2}')
-    interface=$(route -n get default | awk '/interface:/{print $2}')
-    if [ -z "$gateway" ] || [ -z "$interface" ]; then
-        exit 1
-    fi
-    echo "$gateway $interface"
-    "#;
-    let out = run_command("sh", &["-c", script])?;
-    let stdout = String::from_utf8_lossy(&out).into_owned();
-    let v = stdout.split_whitespace().collect::<Vec<_>>();
-    if v.len() != 2 {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, "No default gateway found"));
+fn get_cf_dict_entry<T>(dict: &CFDictionary, key: CFString) -> Option<T>
+where
+    T: CFPropertyListSubClass,
+{
+    let result = dict.find(key.as_CFTypeRef())?;
+    if result.is_null() {
+        return None;
     }
-
-    let addr = IpAddr::from_str(v[0]).map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    Ok((addr, v[1].to_string()))
+    let property_list = unsafe { CFPropertyList::wrap_under_get_rule(*result) };
+    property_list.downcast::<T>()
 }
 
-pub(crate) fn configure_dns_servers(dns_servers: &[IpAddr]) -> std::io::Result<()> {
-    if dns_servers.is_empty() {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, "dns_servers is empty"));
-    }
-    let dns_servers = dns_servers.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(" ");
-    let script = format!(
-        r#"
-    dns_servers={}
-    services=$(networksetup -listnetworkserviceorder | grep 'Hardware Port')
-    while read line; do
-        sname=$(echo $line | awk -F  "(, )|(: )|[)]" '{{print $2}}')
-        sdev=$(echo $line | awk -F  "(, )|(: )|[)]" '{{print $4}}')
-        if [ -n "$sdev" ]; then
-            ifout="$(ifconfig $sdev 2>/dev/null)"
-            echo "$ifout" | grep 'status: active' > /dev/null 2>&1
-            rc="$?"
-            if [ "$rc" -eq 0 ]; then
-                currentservice="$sname"
-                networksetup -setdnsservers "$currentservice" $dns_servers
-            fi
-        fi
-    done <<< "$(echo "$services")"
-    if [ -z "$currentservice" ]; then
-        >&2 echo "Could not find current service"
-        exit 1
-    fi
-    "#,
-        dns_servers
-    );
+macro_rules! ret_err {
+    ( $x:expr ) => {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, $x))
+    };
+}
 
-    let _r = run_command("sh", &["-c", &script])?;
+///
+/// Get the gatway IP, name and service ID of the default interface.
+pub(crate) fn get_default_iface_params() -> std::io::Result<(IpAddr, String, String)> {
+    let store = SCDynamicStoreBuilder::new("tproxy-config get iface params").build();
+    let Some(property_list) = store.get("State:/Network/Global/IPv4") else {
+        ret_err!("Failed to get network state")
+    };
+    let Some(dict) = property_list.downcast::<CFDictionary>() else {
+        ret_err!("Dictionary conversion failed")
+    };
+    let Some(gateway) = get_cf_dict_entry::<CFString>(&dict, "Router".into()) else {
+        ret_err!("Failed to get default gateway")
+    };
+    let Some(interface) = get_cf_dict_entry::<CFString>(&dict, "PrimaryInterface".into()) else {
+        ret_err!("Failed to get default interface")
+    };
+    let Some(service_id) = get_cf_dict_entry::<CFString>(&dict, "PrimaryService".into()) else {
+        ret_err!("Failed to get default service")
+    };
+    let gateway_ip =
+        IpAddr::from_str(gateway.to_string().as_str()).map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+
+    Ok((gateway_ip, interface.to_string(), service_id.to_string()))
+}
+
+fn configure_dns_servers(service_id: &String, dns_servers: &[IpAddr]) -> std::io::Result<()> {
+    let store = SCDynamicStoreBuilder::new("tproxy-config configure dns").build();
+    let mut dns_server_vec = Vec::<CFString>::new();
+    dns_servers.iter().for_each(|x| dns_server_vec.push(x.to_string().as_str().into()));
+    let dns_server_array = CFArray::from_CFTypes(dns_server_vec.as_slice());
+    let dns_dict = CFDictionary::from_CFType_pairs(&[(CFString::from("ServerAddresses"), dns_server_array)]);
+    let key = format!("State:/Network/Service/{}/DNS", service_id).as_str().into();
+    store.set::<CFString, CFDictionary>(key, dns_dict.to_untyped());
     Ok(())
 }
 
-fn dns_servers_from_etc_resolv_conf_file() -> std::io::Result<Vec<IpAddr>> {
-    let mut buf = Vec::with_capacity(4096);
-    let mut f = std::fs::File::open(ETC_RESOLV_CONF_FILE)?;
-    use std::io::Read;
-    f.read_to_end(&mut buf)?;
-    let cfg = resolv_conf::Config::parse(&buf).map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
-    let mut dns_servers = Vec::new();
-    for name_server in cfg.nameservers {
-        dns_servers.push(name_server.into());
+/// Get the DNS servers from the specified service.
+/// If the DNS servers are obtained through DHCP, this function will return None.
+/// Overridden DNS servers are returned as a vector.
+fn get_dns_servers(service_id: &String) -> std::io::Result<Option<Vec<IpAddr>>> {
+    let store = SCDynamicStoreBuilder::new("tproxy-config get dns").build();
+    let key: CFString = format!("State:/Network/Service/{}/DNS", service_id).as_str().into();
+
+    let Some(result) = store.get(key) else {
+        return Ok(None);
+    };
+
+    let Some(cf_dict) = result.downcast::<CFDictionary>() else {
+        ret_err!("Network service DNS server conversion failed");
+    };
+
+    let Some(server_addresses) = cf_dict.find(CFString::from("ServerAddresses").as_CFTypeRef()) else {
+        return Ok(None);
+    };
+
+    if server_addresses.is_null() {
+        ret_err!("Server addresses are null");
     }
-    Ok(dns_servers)
-}
 
-fn configure_system_proxy(state: bool, http_proxy: Option<SocketAddr>, socks_proxy: Option<SocketAddr>) -> std::io::Result<()> {
-    let state = if state { "on" } else { "off" };
+    let server_addr_prop = unsafe { CFPropertyList::wrap_under_get_rule(*server_addresses) };
+    let Some(cf_array) = server_addr_prop.downcast::<CFArray>() else {
+        ret_err!("Server address conversion failed");
+    };
 
-    fn port_and_status(proxy_addr: Option<SocketAddr>) -> (String, String, &'static str) {
-        match proxy_addr {
-            Some(addr) => (addr.ip().to_string(), addr.port().to_string(), "on"),
-            None => ("".to_string(), "".to_string(), "off"),
+    let mut vec: Vec<IpAddr> = Vec::new();
+    for item in cf_array.iter() {
+        if item.is_null() {
+            continue;
         }
+
+        let property_list = unsafe { CFPropertyList::wrap_under_get_rule(*item) };
+        let Some(addr_str) = property_list.downcast::<CFString>() else {
+            continue;
+        };
+        let ip =
+            IpAddr::from_str(addr_str.to_string().as_str()).map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+
+        vec.push(ip);
     }
-    let (http_addr, http_port, http_port_enabled) = port_and_status(http_proxy);
-    let (socks_addr, socks_port, socks_port_enabled) = port_and_status(socks_proxy);
+    Ok(Some(vec))
+}
 
-    let script = format!(
-        r#"
-    state={}
-    http_addr={}
-    http_port={}
-    http_port_enabled={}
-    socks_addr={}
-    socks_port={}
-    socks_port_enabled={}
-
-    services=$(networksetup -listnetworkserviceorder | grep 'Hardware Port')
-
-    while read line; do
-        sname=$(echo $line | awk -F  "(, )|(: )|[)]" '{{print $2}}')
-        sdev=$(echo $line | awk -F  "(, )|(: )|[)]" '{{print $4}}')
-        if [ -n "$sdev" ]; then
-            ifout="$(ifconfig $sdev 2>/dev/null)"
-            echo "$ifout" | grep 'status: active' > /dev/null 2>&1
-            rc="$?"
-            if [ "$rc" -eq 0 ]; then
-                currentservice="$sname"
-                currentdevice="$sdev"
-                currentmac=$(echo "$ifout" | awk '/ether/{{print $2}}')
-
-                if [ "$state" = "on" ]; then
-                    if [ "$http_port_enabled" = "on" ]; then
-                        networksetup -setwebproxy "$currentservice" "$http_addr" $http_port
-                        networksetup -setsecurewebproxy "$currentservice" "$http_addr" $http_port
-                    fi
-                    if [ "$socks_port_enabled" = "on" ]; then
-                        networksetup -setsocksfirewallproxy "$currentservice" "$socks_addr" $socks_port
-                    fi
-                elif [ "$state" = "off" ]; then
-                    networksetup -setwebproxystate "$currentservice" off
-                    networksetup -setsecurewebproxystate "$currentservice" off
-                    networksetup -setsocksfirewallproxystate "$currentservice" off
-                else
-                    echo "invalid argument"
-                fi
-            fi
-        fi
-    done <<< "$(echo "$services")"
-
-    if [ -z "$currentservice" ]; then
-        >&2 echo "Could not find current service"
-        exit 1
-    fi
-    "#,
-        state, http_addr, http_port, http_port_enabled, socks_addr, socks_port, socks_port_enabled
-    );
-
-    let _r = run_command("sh", &["-c", &script])?;
-    Ok(())
+fn remove_dns_servers(service_id: &String) {
+    let store = SCDynamicStoreBuilder::new("tproxy-config remove dns").build();
+    let key: CFString = format!("State:/Network/Service/{}/DNS", service_id).as_str().into();
+    store.remove(key);
 }
 
 pub(crate) fn flush_dns_cache() -> std::io::Result<()> {
@@ -339,23 +313,4 @@ pub(crate) fn flush_dns_cache() -> std::io::Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_configure_proxy_servers() {
-        let v = dns_servers_from_etc_resolv_conf_file().unwrap();
-        println!("{:?}", v);
-
-        // let servers = ["8.8.8.8".parse().unwrap(), "8.8.4.4".parse().unwrap()];
-        // configure_dns_servers(&servers).unwrap();
-
-        let http_proxy = "127.0.0.1:1081".parse().unwrap();
-        let socks_proxy = "127.0.0.1:1080".parse().unwrap();
-        configure_system_proxy(true, Some(http_proxy), Some(socks_proxy)).unwrap();
-        configure_system_proxy(false, None, None).unwrap();
-    }
 }
