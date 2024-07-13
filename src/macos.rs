@@ -102,8 +102,6 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         default_service_dns: dns_servers,
     };
 
-    log::debug!("resolvconf content {:?}", state.restore_resolvconf_content);
-
     #[cfg(feature = "unsafe-state-file")]
     crate::store_intermediate_state(&state)?;
 
@@ -242,7 +240,7 @@ fn configure_dns_servers(service_id: &String, dns_servers: &[IpAddr]) -> std::io
     dns_servers.iter().for_each(|x| dns_server_vec.push(x.to_string().as_str().into()));
     let dns_server_array = CFArray::from_CFTypes(dns_server_vec.as_slice());
     let dns_dict = CFDictionary::from_CFType_pairs(&[(CFString::from("ServerAddresses"), dns_server_array)]);
-    let key = format!("State:/Network/Service/{}/DNS", service_id).as_str().into();
+    let key = format!("Setup:/Network/Service/{}/DNS", service_id).as_str().into();
     store.set::<CFString, CFDictionary>(key, dns_dict.to_untyped());
     Ok(())
 }
@@ -252,7 +250,7 @@ fn configure_dns_servers(service_id: &String, dns_servers: &[IpAddr]) -> std::io
 /// Overridden DNS servers are returned as a vector.
 fn get_dns_servers(service_id: &String) -> std::io::Result<Option<Vec<IpAddr>>> {
     let store = SCDynamicStoreBuilder::new("tproxy-config get dns").build();
-    let key: CFString = format!("State:/Network/Service/{}/DNS", service_id).as_str().into();
+    let key: CFString = format!("Setup:/Network/Service/{}/DNS", service_id).as_str().into();
 
     let Some(result) = store.get(key) else {
         return Ok(None);
@@ -295,7 +293,7 @@ fn get_dns_servers(service_id: &String) -> std::io::Result<Option<Vec<IpAddr>>> 
 
 fn remove_dns_servers(service_id: &String) {
     let store = SCDynamicStoreBuilder::new("tproxy-config remove dns").build();
-    let key: CFString = format!("State:/Network/Service/{}/DNS", service_id).as_str().into();
+    let key: CFString = format!("Setup:/Network/Service/{}/DNS", service_id).as_str().into();
     store.remove(key);
 }
 
