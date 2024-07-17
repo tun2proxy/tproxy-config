@@ -5,11 +5,12 @@ use system_configuration::{
     core_foundation::{
         array::CFArray,
         base::TCFType,
-        dictionary::CFDictionary,
+        dictionary::{CFDictionary, CFDictionaryGetValue},
         propertylist::{CFPropertyList, CFPropertyListSubClass},
         string::CFString,
     },
     dynamic_store::SCDynamicStoreBuilder,
+    sys::dynamic_store::SCDynamicStoreCopyValue,
 };
 
 use crate::{run_command, TproxyArgs, TproxyState, ETC_RESOLV_CONF_FILE};
@@ -19,7 +20,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     flush_dns_cache()?;
 
     // 0. Save the original gateway and scope
-    let (original_gateway_0, orig_gw_iface, service_id) = get_default_iface_params()?;
+    let (original_gateway_0, orig_gw_iface, service_id, orig_iface_name) = get_default_iface_params()?;
     let original_gateway = original_gateway_0.to_string();
 
     let tun_ip = tproxy_args.tun_ip.to_string();
@@ -87,7 +88,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         use std::io::Write;
         writeln!(writer, "nameserver {}\n", tun_gateway)?;
 
-        configure_dns_servers(&service_id, &[tproxy_args.tun_gateway])?;
+        configure_dns_servers(orig_iface_name.clone(), &service_id, &[tproxy_args.tun_gateway])?;
     }
 
     let state = TproxyState {
@@ -100,6 +101,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         tproxy_removed_done: false,
         default_service_id: Some(service_id),
         default_service_dns: dns_servers,
+        orig_iface_name,
     };
 
     #[cfg(feature = "unsafe-state-file")]
@@ -143,7 +145,7 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
 
     if let Some(service_id) = &state.default_service_id {
         if let Some(original_dns_servers) = &state.default_service_dns {
-            if let Err(_err) = configure_dns_servers(service_id, original_dns_servers.as_slice()) {
+            if let Err(_err) = configure_dns_servers(state.orig_iface_name.clone(), service_id, original_dns_servers.as_slice()) {
                 log::debug!("restore original dns servers error: {}", _err);
             }
         } else {
@@ -211,7 +213,7 @@ macro_rules! ret_err {
 
 ///
 /// Get the gatway IP, name and service ID of the default interface.
-pub(crate) fn get_default_iface_params() -> std::io::Result<(IpAddr, String, String)> {
+pub(crate) fn get_default_iface_params() -> std::io::Result<(IpAddr, String, String, Option<String>)> {
     let store = SCDynamicStoreBuilder::new("tproxy-config get iface params").build();
     let Some(property_list) = store.get("State:/Network/Global/IPv4") else {
         ret_err!("Failed to get network state")
@@ -228,13 +230,30 @@ pub(crate) fn get_default_iface_params() -> std::io::Result<(IpAddr, String, Str
     let Some(service_id) = get_cf_dict_entry::<CFString>(&dict, "PrimaryService".into()) else {
         ret_err!("Failed to get default service")
     };
-    let gateway_ip =
-        IpAddr::from_str(gateway.to_string().as_str()).map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
-    Ok((gateway_ip, interface.to_string(), service_id.to_string()))
+    use std::io::{Error, ErrorKind::InvalidData};
+    let gateway_ip = IpAddr::from_str(gateway.to_string().as_str()).map_err(|err| Error::new(InvalidData, err))?;
+
+    let mut iface_name = None;
+    let svc_path: CFString = format!("Setup:/Network/Service/{}", service_id).as_str().into();
+    if let Some(service_dict) = unsafe { SCDynamicStoreCopyValue(store.as_concrete_TypeRef(), svc_path.as_concrete_TypeRef()).as_ref() }
+        .and_then(|plist| unsafe { CFPropertyList::wrap_under_create_rule(plist) }.downcast::<CFDictionary>())
+    {
+        let key: CFString = "UserDefinedName".into();
+        if let Some(name) = unsafe { CFDictionaryGetValue(service_dict.as_concrete_TypeRef(), key.as_CFTypeRef()).as_ref() }
+            .map(|cfstr| unsafe { CFString::wrap_under_get_rule(cfstr as *const _ as _) })
+        {
+            iface_name = Some(name.to_string());
+        }
+    }
+
+    Ok((gateway_ip, interface.to_string(), service_id.to_string(), iface_name))
 }
 
-fn configure_dns_servers(service_id: &String, dns_servers: &[IpAddr]) -> std::io::Result<()> {
+fn configure_dns_servers(iface_name: Option<String>, service_id: &str, dns_servers: &[IpAddr]) -> std::io::Result<()> {
+    if dns_servers.is_empty() {
+        return Ok(());
+    }
     let store = SCDynamicStoreBuilder::new("tproxy-config configure dns").build();
     let mut dns_server_vec = Vec::<CFString>::new();
     dns_servers.iter().for_each(|x| dns_server_vec.push(x.to_string().as_str().into()));
@@ -242,6 +261,13 @@ fn configure_dns_servers(service_id: &String, dns_servers: &[IpAddr]) -> std::io
     let dns_dict = CFDictionary::from_CFType_pairs(&[(CFString::from("ServerAddresses"), dns_server_array)]);
     let key = format!("Setup:/Network/Service/{}/DNS", service_id).as_str().into();
     store.set::<CFString, CFDictionary>(key, dns_dict.to_untyped());
+
+    if let Some(iface_name) = iface_name {
+        // networksetup -setdnsservers "$iface_name" $servers
+        let iface_name = format!("\"{}\"", iface_name);
+        let addrs = dns_servers.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(" ");
+        run_command("networksetup", &["-setdnsservers", &iface_name, &addrs])?;
+    }
     Ok(())
 }
 

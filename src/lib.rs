@@ -82,6 +82,8 @@ pub struct TproxyState {
     pub(crate) default_service_id: Option<String>,
     #[cfg(target_os = "macos")]
     pub(crate) default_service_dns: Option<Vec<IpAddr>>,
+    #[cfg(target_os = "macos")]
+    pub(crate) orig_iface_name: Option<String>,
 }
 
 #[allow(dead_code)]
