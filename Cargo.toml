@@ -16,14 +16,14 @@ unsafe-state-file = []
 [dependencies]
 cidr = { version = "0.2", features = ["serde"] }
 log = { version = "0.4" }
-regex = "1.10"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 resolv-conf = "0.7"
-system-configuration = "0.6.0"
+system-configuration = "0.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.29", features = ["fs", "mount", "process"] }
-tempfile = "3.10"
+tempfile = "3"
