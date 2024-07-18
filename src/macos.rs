@@ -262,6 +262,9 @@ fn configure_dns_servers(iface_name: Option<String>, service_id: &str, dns_serve
     let key = format!("Setup:/Network/Service/{}/DNS", service_id).as_str().into();
     store.set::<CFString, CFDictionary>(key, dns_dict.to_untyped());
 
+    // The above statements actually changes the DNS settings, but the network preferences dialog still
+    // shows the old settings. Therefore, we execute the following command additionally.
+    // Maybe one day the above settings will fully take effect, and this command can be removed.
     if let Some(iface_name) = iface_name {
         // networksetup -setdnsservers "$iface_name" $servers
         let iface_name = format!("\"{}\"", iface_name);
