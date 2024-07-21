@@ -266,9 +266,11 @@ fn configure_dns_servers(iface_name: Option<String>, service_id: &str, dns_serve
     // shows the old settings. Therefore, we execute the following command additionally.
     // Maybe one day the above settings will fully take effect, and this command can be removed.
     if let Some(iface_name) = iface_name {
-        // networksetup -setdnsservers "$iface_name" $servers
-        let addrs = dns_servers.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(" ");
-        run_command("networksetup", &["-setdnsservers", &iface_name, &addrs])?;
+        // networksetup -setdnsservers "$iface_name" dns1 dns2 ...
+        let addrs = dns_servers.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+        let mut args = vec!["-setdnsservers", &iface_name];
+        args.extend(addrs.iter().map(|s| s.as_str()));
+        run_command("networksetup", &args)?;
     }
     Ok(())
 }
