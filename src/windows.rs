@@ -15,7 +15,6 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     };
     let gateway = tproxy_args.tun_gateway.to_string();
     let args = &["add", &unspecified, "mask", &unspecified, &gateway, "metric", "6"];
-    log::info!("route {:?}", args);
     run_command("route", args)?;
 
     let (original_gateway, _) = get_default_gateway()?;
@@ -32,7 +31,6 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     // command: `netsh interface ip set dns "utun3" static 10.0.0.1`
     let tun_name = format!("\"{}\"", tproxy_args.tun_name);
     let args = &["interface", "ip", "set", "dns", &tun_name, "static", &gateway];
-    log::info!("netsh {:?}", args);
     run_command("netsh", args)?;
 
     let state = TproxyState {
@@ -54,7 +52,6 @@ fn do_bypass_ip(bypass_ip: cidr::IpCidr, original_gateway: IpAddr) -> std::io::R
     // route the bypass ip to the original gateway
     // command: `route add bypass_ip/24 original_gateway metric 1`
     let args = &["add", &bypass_ip.to_string(), &original_gateway.to_string(), "metric", "1"];
-    log::info!("route {:?}", args);
     run_command("route", args)?;
     Ok(())
 }
