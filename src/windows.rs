@@ -1,5 +1,19 @@
 #![cfg(target_os = "windows")]
 
+use windows_sys::{
+    core::GUID,
+    Win32::{
+        Foundation::{NO_ERROR, WIN32_ERROR},
+        NetworkManagement::{
+            IpHelper::{
+                ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToGuid, DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS_VERSION1,
+                DNS_SETTING_NAMESERVER,
+            },
+            Ndis::NET_LUID_LH,
+        },
+    },
+};
+
 use crate::{run_command, TproxyArgs, TproxyState};
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -27,11 +41,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         do_bypass_ip(cidr, original_gateway)?;
     }
 
-    // 1. Setup the adapter's DNS
-    // command: `netsh interface ip set dns "utun3" static 10.0.0.1`
-    let tun_name = format!("\"{}\"", tproxy_args.tun_name);
-    let args = &["interface", "ip", "set", "dns", &tun_name, "static", &gateway];
-    run_command("netsh", args)?;
+    set_dns_server(&tproxy_args.tun_name, tproxy_args.tun_gateway)?;
 
     let state = TproxyState {
         tproxy_args: Some(tproxy_args.clone()),
@@ -138,6 +148,49 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     Ok(())
 }
 
+// NETIOAPI_API SetInterfaceDnsSettings(GUID Interface, const DNS_INTERFACE_SETTINGS *Settings);
+crate::define_fn_dynamic_load!(
+    SetInterfaceDnsSettingsFn,
+    unsafe extern "system" fn(interface: GUID, settings: *const DNS_INTERFACE_SETTINGS) -> WIN32_ERROR,
+    SET_INTERFACE_DNS_SETTINGS,
+    get_fn_set_interface_dns_settings,
+    "iphlpapi.dll",
+    "SetInterfaceDnsSettings"
+);
+
+pub(crate) fn set_dns_server(iface: &str, dns_server: IpAddr) -> std::io::Result<()> {
+    let Some(set_dns_fn) = get_fn_set_interface_dns_settings() else {
+        // command: `netsh interface ip set dns "utun3" static 10.0.0.1`
+        // or command: `powershell Set-DnsClientServerAddress -InterfaceAlias "utun3" -ServerAddresses ("10.0.0.1")`
+        let tun_name = format!("\"{}\"", iface);
+        let args = &["interface", "ip", "set", "dns", &tun_name, "static", &dns_server.to_string()];
+        run_command("netsh", args)?;
+        return Ok(());
+    };
+    let svr: Vec<u16> = dns_server.to_string().encode_utf16().chain(std::iter::once(0)).collect();
+    let settings = DNS_INTERFACE_SETTINGS {
+        Version: DNS_INTERFACE_SETTINGS_VERSION1,
+        Flags: DNS_SETTING_NAMESERVER as _,
+        NameServer: svr.as_ptr() as _,
+        Domain: std::ptr::null_mut(),
+        SearchList: std::ptr::null_mut(),
+        RegistrationEnabled: 0,
+        RegisterAdapterName: 0,
+        EnableLLMNR: 0,
+        QueryAdapterName: 0,
+        ProfileNameServer: std::ptr::null_mut(),
+    };
+
+    let luid = alias_to_luid(iface)?;
+    let guid = luid_to_guid(&luid)?;
+    let ret = unsafe { set_dns_fn(guid, &settings) };
+    if ret != NO_ERROR {
+        let err = std::io::Error::from_raw_os_error(ret as _);
+        return Err(err);
+    }
+    Ok(())
+}
+
 pub(crate) fn get_default_gateway() -> std::io::Result<(IpAddr, String)> {
     let addr = get_default_gateway_ip()?;
     let iface = get_default_gateway_interface()?;
@@ -200,6 +253,24 @@ pub(crate) fn flush_dns_cache() -> std::io::Result<()> {
     // command: `ipconfig /flushdns`
     run_command("ipconfig", &["/flushdns"])?;
     Ok(())
+}
+
+pub fn alias_to_luid(alias: &str) -> std::io::Result<NET_LUID_LH> {
+    let alias = alias.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
+    let mut luid = unsafe { std::mem::zeroed() };
+
+    match unsafe { ConvertInterfaceAliasToLuid(alias.as_ptr(), &mut luid) } {
+        0 => Ok(luid),
+        err => Err(std::io::Error::from_raw_os_error(err as _)),
+    }
+}
+
+pub fn luid_to_guid(luid: &NET_LUID_LH) -> std::io::Result<GUID> {
+    let mut guid = unsafe { std::mem::zeroed() };
+    match unsafe { ConvertInterfaceLuidToGuid(luid, &mut guid) } {
+        0 => Ok(guid),
+        err => Err(std::io::Error::from_raw_os_error(err as _)),
+    }
 }
 
 #[cfg(test)]
