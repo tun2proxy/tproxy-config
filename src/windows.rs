@@ -139,6 +139,12 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
 }
 
 pub(crate) fn get_default_gateway() -> std::io::Result<(IpAddr, String)> {
+    let addr = get_default_gateway_ip()?;
+    let iface = get_default_gateway_interface()?;
+    Ok((addr, iface))
+}
+
+pub(crate) fn get_default_gateway_ip() -> std::io::Result<IpAddr> {
     let cmd = "Get-WmiObject -Class Win32_NetworkAdapterConfiguration -Filter IPEnabled=TRUE | ForEach-Object { $_.DefaultIPGateway }";
     let gateways = match run_command("powershell", &["-Command", cmd]) {
         Ok(gateways) => gateways,
@@ -170,9 +176,7 @@ pub(crate) fn get_default_gateway() -> std::io::Result<(IpAddr, String)> {
     }
 
     let err = std::io::Error::new(std::io::ErrorKind::Other, "No default gateway found");
-    let addr = ipv4_gateway.or(ipv6_gateway).ok_or(err)?;
-    let iface = get_default_gateway_interface()?;
-    Ok((addr, iface))
+    ipv4_gateway.or(ipv6_gateway).ok_or(err)
 }
 
 pub(crate) fn get_default_gateway_interface() -> std::io::Result<String> {
