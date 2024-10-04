@@ -18,9 +18,12 @@ use crate::{run_command, TproxyArgs, TproxyState};
 use std::net::{IpAddr, Ipv4Addr};
 
 pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
+    log::trace!("Setting up transparent proxy...");
+
     flush_dns_cache()?;
 
-    // 2. Route all traffic to the adapter, here the destination is adapter's gateway
+    log::trace!("Route all traffic to the gateway of adapter \"{}\"...", tproxy_args.tun_name);
+    // Route all traffic to the adapter, here the destination is adapter's gateway
     // command: `route add 0.0.0.0 mask 0.0.0.0 10.1.0.1 metric 6`
     let unspecified = if tproxy_args.tun_gateway.is_ipv4() {
         Ipv4Addr::UNSPECIFIED.to_string()
@@ -31,8 +34,10 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     let args = &["add", &unspecified, "mask", &unspecified, &gateway, "metric", "6"];
     run_command("route", args)?;
 
-    let (original_gateway, _) = get_default_gateway()?;
+    log::trace!("Get default gateway...");
+    let original_gateway = get_default_gateway_ip()?;
 
+    log::trace!("Setting bypass IPs...");
     for bypass_ip in tproxy_args.bypass_ips.iter() {
         do_bypass_ip(*bypass_ip, original_gateway)?;
     }
@@ -41,7 +46,10 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         do_bypass_ip(cidr, original_gateway)?;
     }
 
+    log::trace!("Setting \"{}\"'s DNS to {}...", tproxy_args.tun_name, tproxy_args.tun_gateway);
     set_dns_server(&tproxy_args.tun_name, tproxy_args.tun_gateway)?;
+
+    log::trace!("Transparent proxy setup done");
 
     let state = TproxyState {
         tproxy_args: Some(tproxy_args.clone()),
@@ -191,6 +199,7 @@ pub(crate) fn set_dns_server(iface: &str, dns_server: IpAddr) -> std::io::Result
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn get_default_gateway() -> std::io::Result<(IpAddr, String)> {
     let addr = get_default_gateway_ip()?;
     let iface = get_default_gateway_interface()?;
@@ -232,6 +241,7 @@ pub(crate) fn get_default_gateway_ip() -> std::io::Result<IpAddr> {
     ipv4_gateway.or(ipv6_gateway).ok_or(err)
 }
 
+#[allow(dead_code)]
 pub(crate) fn get_default_gateway_interface() -> std::io::Result<String> {
     let cmd = "Get-WmiObject -Class Win32_NetworkAdapter | Where-Object { $_.NetConnectionStatus -eq 2 } | Select-Object -First 1 -ExpandProperty NetConnectionID";
     let iface = match run_command("powershell", &["-Command", cmd]) {
