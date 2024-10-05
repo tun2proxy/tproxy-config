@@ -3,19 +3,21 @@
 use windows_sys::{
     core::GUID,
     Win32::{
-        Foundation::{NO_ERROR, WIN32_ERROR},
+        Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS, NO_ERROR, WIN32_ERROR},
         NetworkManagement::{
             IpHelper::{
-                ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToGuid, DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS_VERSION1,
-                DNS_SETTING_NAMESERVER,
+                ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToGuid, GetAdaptersAddresses, DNS_INTERFACE_SETTINGS,
+                DNS_INTERFACE_SETTINGS_VERSION1, DNS_SETTING_NAMESERVER, GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_INCLUDE_PREFIX,
+                IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, IP_ADAPTER_ADDRESSES_LH,
             },
-            Ndis::NET_LUID_LH,
+            Ndis::{IfOperStatusUp, NET_LUID_LH},
         },
+        Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6},
     },
 };
 
 use crate::{run_command, TproxyArgs, TproxyState};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     log::trace!("Setting up transparent proxy...");
@@ -207,6 +209,16 @@ pub(crate) fn get_default_gateway() -> std::io::Result<(IpAddr, String)> {
 }
 
 pub(crate) fn get_default_gateway_ip() -> std::io::Result<IpAddr> {
+    match get_active_network_interface_gateways().map(|gateways| gateways[0]) {
+        Ok(gateway) => Ok(gateway),
+        Err(e) => {
+            log::debug!("Failed to get default gateway by GetAdaptersAddresses: {}", e);
+            get_default_gateway_ip_by_cmd()
+        }
+    }
+}
+
+pub(crate) fn get_default_gateway_ip_by_cmd() -> std::io::Result<IpAddr> {
     let cmd = "Get-WmiObject -Class Win32_NetworkAdapterConfiguration -Filter IPEnabled=TRUE | ForEach-Object { $_.DefaultIPGateway }";
     let gateways = match run_command("powershell", &["-Command", cmd]) {
         Ok(gateways) => gateways,
@@ -283,6 +295,91 @@ pub fn luid_to_guid(luid: &NET_LUID_LH) -> std::io::Result<GUID> {
     }
 }
 
+pub fn get_active_network_interface_gateways() -> std::io::Result<Vec<IpAddr>> {
+    let mut addrs = vec![];
+    get_adapters_addresses(|adapter| {
+        if adapter.OperStatus == IfOperStatusUp && [IF_TYPE_IEEE80211, IF_TYPE_ETHERNET_CSMACD].contains(&adapter.IfType) {
+            let mut current_gateway = adapter.FirstGatewayAddress;
+            while !current_gateway.is_null() {
+                let gateway = unsafe { &*current_gateway };
+                {
+                    let sockaddr_ptr = gateway.Address.lpSockaddr;
+                    let sockaddr = unsafe { &*(sockaddr_ptr as *const SOCKADDR) };
+                    let a = unsafe { sockaddr_to_socket_addr(sockaddr) }?;
+                    addrs.insert(0, a.ip());
+                }
+                current_gateway = gateway.Next;
+            }
+        }
+        Ok(())
+    })?;
+    if addrs.is_empty() {
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "No gateway found"))
+    } else {
+        Ok(addrs)
+    }
+}
+
+pub(crate) fn get_adapters_addresses<F>(mut callback: F) -> std::io::Result<()>
+where
+    F: FnMut(IP_ADAPTER_ADDRESSES_LH) -> std::io::Result<()>,
+{
+    let mut size = 0;
+    let flags = GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_INCLUDE_GATEWAYS;
+    let family = AF_UNSPEC as u32;
+
+    // Make an initial call to GetAdaptersAddresses to get the
+    // size needed into the size variable
+    let result = unsafe { GetAdaptersAddresses(family, flags, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) };
+
+    if result != ERROR_BUFFER_OVERFLOW {
+        return Err(std::io::Error::from_raw_os_error(result as _));
+    }
+    // Allocate memory for the buffer
+    let mut addresses: Vec<u8> = vec![0; (size + 4) as usize];
+
+    // Make a second call to GetAdaptersAddresses to get the actual data we want
+    let addrs = addresses.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+    let result = unsafe { GetAdaptersAddresses(family, flags, std::ptr::null_mut(), addrs, &mut size) };
+
+    if ERROR_SUCCESS != result {
+        return Err(std::io::Error::from_raw_os_error(result as _));
+    }
+
+    // If successful, output some information from the data we received
+    let mut current_addresses = addresses.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+    while !current_addresses.is_null() {
+        unsafe {
+            callback(*current_addresses)?;
+            current_addresses = (*current_addresses).Next;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) unsafe fn sockaddr_to_socket_addr(sock_addr: *const SOCKADDR) -> std::io::Result<SocketAddr> {
+    use std::io::{Error, ErrorKind};
+    let address = match (*sock_addr).sa_family {
+        AF_INET => sockaddr_in_to_socket_addr(&*(sock_addr as *const SOCKADDR_IN)),
+        AF_INET6 => sockaddr_in6_to_socket_addr(&*(sock_addr as *const SOCKADDR_IN6)),
+        _ => return Err(Error::new(ErrorKind::Other, "Unsupported address type")),
+    };
+    Ok(address)
+}
+
+pub(crate) unsafe fn sockaddr_in_to_socket_addr(sockaddr_in: &SOCKADDR_IN) -> SocketAddr {
+    let ip_bytes = sockaddr_in.sin_addr.S_un.S_addr.to_ne_bytes();
+    let ip = std::net::IpAddr::from(ip_bytes);
+    let port = u16::from_be(sockaddr_in.sin_port);
+    SocketAddr::new(ip, port)
+}
+
+pub(crate) unsafe fn sockaddr_in6_to_socket_addr(sockaddr_in6: &SOCKADDR_IN6) -> SocketAddr {
+    let ip = std::net::IpAddr::from(sockaddr_in6.sin6_addr.u.Byte);
+    let port = u16::from_be(sockaddr_in6.sin6_port);
+    SocketAddr::new(ip, port)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +388,8 @@ mod tests {
     fn test_get_default_gateway() {
         let (addr, iface) = get_default_gateway().unwrap();
         println!("addr: {:?}, iface: {}", addr, iface);
+
+        let gw = get_active_network_interface_gateways().unwrap();
+        println!("gateways: {:?}", gw);
     }
 }
