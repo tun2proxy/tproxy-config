@@ -160,16 +160,16 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
 
 // NETIOAPI_API SetInterfaceDnsSettings(GUID Interface, const DNS_INTERFACE_SETTINGS *Settings);
 crate::define_fn_dynamic_load!(
-    SetInterfaceDnsSettingsFn,
+    SetInterfaceDnsSettingsDeclare,
     unsafe extern "system" fn(interface: GUID, settings: *const DNS_INTERFACE_SETTINGS) -> WIN32_ERROR,
     SET_INTERFACE_DNS_SETTINGS,
-    get_fn_set_interface_dns_settings,
+    SetInterfaceDnsSettings,
     "iphlpapi.dll",
     "SetInterfaceDnsSettings"
 );
 
 pub(crate) fn set_dns_server(iface: &str, dns_server: IpAddr) -> std::io::Result<()> {
-    let Some(set_dns_fn) = get_fn_set_interface_dns_settings() else {
+    let Some(set_dns_fn) = SetInterfaceDnsSettings() else {
         // command: `netsh interface ip set dns "utun3" static 10.0.0.1`
         // or command: `powershell Set-DnsClientServerAddress -InterfaceAlias "utun3" -ServerAddresses ("10.0.0.1")`
         let tun_name = format!("\"{}\"", iface);
