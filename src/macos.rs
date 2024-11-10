@@ -70,7 +70,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
     run_command("route", args)?;
     // */
 
-    let dns_servers = match get_dns_servers(&service_id) {
+    let default_service_dns = match get_dns_servers(&service_id) {
         Ok(servers) => servers,
         Err(msg) => {
             log::error!("failed to get DNS servers of default interface: {}", msg);
@@ -88,7 +88,8 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         use std::io::Write;
         writeln!(writer, "nameserver {}\n", tun_gateway)?;
 
-        configure_dns_servers(orig_iface_name.clone(), &service_id, &[tproxy_args.tun_gateway])?;
+        let orig_iface_name = orig_iface_name.as_deref().unwrap_or("");
+        configure_dns_servers(orig_iface_name, &service_id, &[tproxy_args.tun_gateway])?;
     }
 
     let state = TproxyState {
@@ -100,7 +101,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         restore_resolvconf_content,
         tproxy_removed_done: false,
         default_service_id: Some(service_id),
-        default_service_dns: dns_servers,
+        default_service_dns,
         orig_iface_name,
     };
 
@@ -144,12 +145,13 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     let original_gw_scope = state.gw_scope.take().ok_or(err)?;
 
     if let Some(service_id) = &state.default_service_id {
-        if let Some(original_dns_servers) = &state.default_service_dns {
-            if let Err(_err) = configure_dns_servers(state.orig_iface_name.clone(), service_id, original_dns_servers.as_slice()) {
+        let iface_friendly_name = state.orig_iface_name.as_deref().unwrap_or("");
+        if let Some(default_service_dns) = &state.default_service_dns {
+            if let Err(_err) = configure_dns_servers(iface_friendly_name, service_id, default_service_dns.as_slice()) {
                 log::debug!("restore original dns servers error: {}", _err);
             }
-        } else {
-            remove_dns_servers(service_id);
+        } else if let Err(e) = remove_dns_servers(service_id, iface_friendly_name) {
+            log::debug!("failed to remove DNS servers: {}", e);
         }
     }
 
@@ -211,8 +213,9 @@ macro_rules! ret_err {
     };
 }
 
+/// The path strings can be found in command `scutil` with subcommand `list`.
 ///
-/// Get the gatway IP, name and service ID of the default interface.
+/// Get the gatway IP, name, service ID, friendly name of the default interface.
 pub(crate) fn get_default_iface_params() -> std::io::Result<(IpAddr, String, String, Option<String>)> {
     let store = SCDynamicStoreBuilder::new("tproxy-config get iface params").build();
     let Some(property_list) = store.get("State:/Network/Global/IPv4") else {
@@ -250,7 +253,7 @@ pub(crate) fn get_default_iface_params() -> std::io::Result<(IpAddr, String, Str
     Ok((gateway_ip, interface.to_string(), service_id.to_string(), iface_name))
 }
 
-fn configure_dns_servers(iface_name: Option<String>, service_id: &str, dns_servers: &[IpAddr]) -> std::io::Result<()> {
+fn configure_dns_servers(iface_friendly_name: &str, service_id: &str, dns_servers: &[IpAddr]) -> std::io::Result<()> {
     if dns_servers.is_empty() {
         return Ok(());
     }
@@ -259,16 +262,18 @@ fn configure_dns_servers(iface_name: Option<String>, service_id: &str, dns_serve
     dns_servers.iter().for_each(|x| dns_server_vec.push(x.to_string().as_str().into()));
     let dns_server_array = CFArray::from_CFTypes(dns_server_vec.as_slice());
     let dns_dict = CFDictionary::from_CFType_pairs(&[(CFString::from("ServerAddresses"), dns_server_array)]);
-    let key = format!("Setup:/Network/Service/{}/DNS", service_id).as_str().into();
-    store.set::<CFString, CFDictionary>(key, dns_dict.to_untyped());
+    let key = format!("State:/Network/Service/{}/DNS", service_id).as_str().into();
+    if !store.set::<CFString, CFDictionary>(key, dns_dict.to_untyped()) {
+        log::error!("Failed to set DNS servers");
+    }
 
     // The above statements actually changes the DNS settings, but the network preferences dialog still
     // shows the old settings. Therefore, we execute the following command additionally.
     // Maybe one day the above settings will fully take effect, and this command can be removed.
-    if let Some(iface_name) = iface_name {
+    if !iface_friendly_name.is_empty() {
         // networksetup -setdnsservers "$iface_name" dns1 dns2 ...
         let addrs = dns_servers.iter().map(|x| x.to_string()).collect::<Vec<String>>();
-        let mut args = vec!["-setdnsservers", &iface_name];
+        let mut args = vec!["-setdnsservers", iface_friendly_name];
         args.extend(addrs.iter().map(|s| s.as_str()));
         run_command("networksetup", &args)?;
     }
@@ -280,7 +285,7 @@ fn configure_dns_servers(iface_name: Option<String>, service_id: &str, dns_serve
 /// Overridden DNS servers are returned as a vector.
 fn get_dns_servers(service_id: &String) -> std::io::Result<Option<Vec<IpAddr>>> {
     let store = SCDynamicStoreBuilder::new("tproxy-config get dns").build();
-    let key: CFString = format!("Setup:/Network/Service/{}/DNS", service_id).as_str().into();
+    let key: CFString = format!("State:/Network/Service/{}/DNS", service_id).as_str().into();
 
     let Some(result) = store.get(key) else {
         return Ok(None);
@@ -313,18 +318,27 @@ fn get_dns_servers(service_id: &String) -> std::io::Result<Option<Vec<IpAddr>>> 
         let Some(addr_str) = property_list.downcast::<CFString>() else {
             continue;
         };
-        let ip =
-            IpAddr::from_str(addr_str.to_string().as_str()).map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        use std::io::{Error, ErrorKind::InvalidData};
+        let ip = IpAddr::from_str(addr_str.to_string().as_str()).map_err(|err| Error::new(InvalidData, err))?;
 
         vec.push(ip);
     }
     Ok(Some(vec))
 }
 
-fn remove_dns_servers(service_id: &String) {
+fn remove_dns_servers(_service_id: &str, _friendly_name: &str) -> std::io::Result<()> {
+    /*
     let store = SCDynamicStoreBuilder::new("tproxy-config remove dns").build();
-    let key: CFString = format!("Setup:/Network/Service/{}/DNS", service_id).as_str().into();
-    store.remove(key);
+    let key: CFString = format!("State:/Network/Service/{}/DNS", _service_id).as_str().into();
+    if !store.remove(key) {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, "Failed to remove DNS servers"));
+    }
+    // */
+    if !_friendly_name.is_empty() {
+        // command: `networksetup -setdnsservers Wi-Fi Empty`
+        run_command("networksetup", &["-setdnsservers", _friendly_name, "Empty"])?;
+    }
+    Ok(())
 }
 
 pub(crate) fn flush_dns_cache() -> std::io::Result<()> {
