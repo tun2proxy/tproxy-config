@@ -159,6 +159,11 @@ fn route_show(is_ipv6: bool) -> std::io::Result<Vec<(IpCidr, Vec<String>)>> {
             continue;
         }
 
+        // if the first part of the route is "unreachable", we ignore it
+        if dst_str == "unreachable" {
+            continue;
+        }
+
         if dst_str == "default" {
             dst_str = if is_ipv6 { "::/0" } else { "0.0.0.0/0" }
         }
