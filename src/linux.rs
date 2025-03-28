@@ -125,6 +125,7 @@ fn setup_resolv_conf(restore: &mut TproxyState) -> std::io::Result<()> {
 }
 
 fn route_show(is_ipv6: bool) -> std::io::Result<Vec<(IpCidr, Vec<String>)>> {
+    use std::io::{Error, ErrorKind::InvalidData};
     let route_show_args = if is_ipv6 {
         ["-6", "route", "show"]
     } else {
@@ -148,11 +149,13 @@ fn route_show(is_ipv6: bool) -> std::io::Result<Vec<(IpCidr, Vec<String>)>> {
         }
 
         let mut split = line.split_whitespace();
-        let mut dst_str = split.next().unwrap();
+        let mut dst_str = split
+            .next()
+            .ok_or(Error::new(InvalidData, format!("failed to parse route {}", line)))?;
 
         // NOTE: ignore routes like "multicast ff00::/8 dev eth1 metric 256"
         if dst_str == "multicast" {
-            // dst_str = split.next().unwrap();
+            // dst_str = split.next()..ok_or(Error::new(InvalidData, format!("failed to parse route {}", line)))?;
             continue;
         }
 
@@ -165,7 +168,11 @@ fn route_show(is_ipv6: bool) -> std::io::Result<Vec<(IpCidr, Vec<String>)>> {
             Some((addr_str, prefix_len_str)) => (addr_str, prefix_len_str),
         };
 
-        let cidr: IpCidr = create_cidr(IpAddr::from_str(addr_str).unwrap(), u8::from_str(prefix_len_str).unwrap())?;
+        let addr = IpAddr::from_str(addr_str)
+            .map_err(|err| Error::new(InvalidData, format!("failed to parse IP address \"{}\": {}", addr_str, err)))?;
+        let len = u8::from_str(prefix_len_str)
+            .map_err(|err| Error::new(InvalidData, format!("failed to parse prefix len \"{}\": {}", prefix_len_str, err)))?;
+        let cidr: IpCidr = create_cidr(addr, len)?;
         let route_components: Vec<String> = split.map(String::from).collect();
         route_info.push((cidr, route_components));
     }
@@ -307,7 +314,8 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         let args = &["route", "flush", "table", table];
         let _ = run_command("ip", args);
 
-        let default_route_components = get_route_components(&IpCidr::from_str("0.0.0.0/0").unwrap())?.unwrap();
+        let default_route_components = get_route_components(&IpCidr::from_str("0.0.0.0/0").unwrap())?
+            .ok_or_else(|| std::io::Error::other("failed to get default route components"))?;
         let mut args = vec!["route", "add", "table", table];
         args.extend(default_route_components.iter().map(|s| s.as_str()));
         run_command("ip", &args)?;
