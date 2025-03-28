@@ -359,23 +359,23 @@ where
 
 pub(crate) unsafe fn sockaddr_to_socket_addr(sock_addr: *const SOCKADDR) -> std::io::Result<SocketAddr> {
     use std::io::{Error, ErrorKind};
-    let address = match (*sock_addr).sa_family {
-        AF_INET => sockaddr_in_to_socket_addr(&*(sock_addr as *const SOCKADDR_IN)),
-        AF_INET6 => sockaddr_in6_to_socket_addr(&*(sock_addr as *const SOCKADDR_IN6)),
+    let address = match (unsafe { *sock_addr }).sa_family {
+        AF_INET => unsafe { sockaddr_in_to_socket_addr(&*(sock_addr as *const SOCKADDR_IN)) },
+        AF_INET6 => unsafe { sockaddr_in6_to_socket_addr(&*(sock_addr as *const SOCKADDR_IN6)) },
         _ => return Err(Error::new(ErrorKind::Other, "Unsupported address type")),
     };
     Ok(address)
 }
 
 pub(crate) unsafe fn sockaddr_in_to_socket_addr(sockaddr_in: &SOCKADDR_IN) -> SocketAddr {
-    let ip_bytes = sockaddr_in.sin_addr.S_un.S_addr.to_ne_bytes();
+    let ip_bytes = unsafe { sockaddr_in.sin_addr.S_un.S_addr.to_ne_bytes() };
     let ip = std::net::IpAddr::from(ip_bytes);
     let port = u16::from_be(sockaddr_in.sin_port);
     SocketAddr::new(ip, port)
 }
 
 pub(crate) unsafe fn sockaddr_in6_to_socket_addr(sockaddr_in6: &SOCKADDR_IN6) -> SocketAddr {
-    let ip = std::net::IpAddr::from(sockaddr_in6.sin6_addr.u.Byte);
+    let ip = std::net::IpAddr::from(unsafe { sockaddr_in6.sin6_addr.u.Byte });
     let port = u16::from_be(sockaddr_in6.sin6_port);
     SocketAddr::new(ip, port)
 }
