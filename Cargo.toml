@@ -1,7 +1,7 @@
 [package]
 name = "tproxy-config"
-version = "6.1.0"
-edition = "2021"
+version = "6.1.1"
+edition = "2024"
 description = "Transparent proxy configuration"
 license = "MIT"
 authors = ["@ssrlive"]

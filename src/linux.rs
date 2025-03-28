@@ -9,7 +9,7 @@ use std::str::FromStr;
 
 use cidr::IpCidr;
 
-use crate::{run_command, TproxyArgs, TproxyState, ETC_RESOLV_CONF_FILE};
+use crate::{ETC_RESOLV_CONF_FILE, TproxyArgs, TproxyState, run_command};
 
 fn bytes_to_string(bytes: Vec<u8>) -> std::io::Result<String> {
     match String::from_utf8(bytes) {

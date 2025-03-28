@@ -13,7 +13,7 @@ use system_configuration::{
     sys::dynamic_store::SCDynamicStoreCopyValue,
 };
 
-use crate::{run_command, TproxyArgs, TproxyState, ETC_RESOLV_CONF_FILE};
+use crate::{ETC_RESOLV_CONF_FILE, TproxyArgs, TproxyState, run_command};
 use std::{net::IpAddr, str::FromStr};
 
 pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {

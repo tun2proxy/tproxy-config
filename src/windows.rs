@@ -1,22 +1,22 @@
 #![cfg(target_os = "windows")]
 
 use windows_sys::{
-    core::GUID,
     Win32::{
         Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS, NO_ERROR, WIN32_ERROR},
         NetworkManagement::{
             IpHelper::{
-                ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToGuid, GetAdaptersAddresses, DNS_INTERFACE_SETTINGS,
-                DNS_INTERFACE_SETTINGS_VERSION1, DNS_SETTING_NAMESERVER, GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_INCLUDE_PREFIX,
-                IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, IP_ADAPTER_ADDRESSES_LH,
+                ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToGuid, DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS_VERSION1,
+                DNS_SETTING_NAMESERVER, GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IF_TYPE_ETHERNET_CSMACD,
+                IF_TYPE_IEEE80211, IP_ADAPTER_ADDRESSES_LH,
             },
             Ndis::{IfOperStatusUp, NET_LUID_LH},
         },
         Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6},
     },
+    core::GUID,
 };
 
-use crate::{run_command, TproxyArgs, TproxyState};
+use crate::{TproxyArgs, TproxyState, run_command};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
