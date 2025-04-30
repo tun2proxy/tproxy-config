@@ -3,7 +3,7 @@
 use std::fs;
 use std::fs::Permissions;
 use std::net::IpAddr;
-use std::os::fd::{AsFd, AsRawFd, FromRawFd};
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::str::FromStr;
 
@@ -64,7 +64,7 @@ fn write_buffer_to_fd(fd: std::os::fd::BorrowedFd<'_>, data: &[u8]) -> std::io::
 fn write_nameserver(fd: std::os::fd::BorrowedFd<'_>, tun_gateway: Option<IpAddr>) -> std::io::Result<()> {
     let tun_gateway = tun_gateway.unwrap_or_else(|| "198.18.0.1".parse().unwrap());
     let data = format!("nameserver {}\n", tun_gateway);
-    nix::sys::stat::fchmod(fd.as_raw_fd(), nix::sys::stat::Mode::from_bits(0o444).unwrap())?;
+    nix::sys::stat::fchmod(fd.as_fd(), nix::sys::stat::Mode::from_bits(0o444).unwrap())?;
     write_buffer_to_fd(fd, data.as_bytes())?;
     Ok(())
 }
@@ -118,7 +118,6 @@ fn setup_resolv_conf(restore: &mut TproxyState) -> std::io::Result<()> {
 
         let flags = nix::fcntl::OFlag::O_WRONLY | nix::fcntl::OFlag::O_CLOEXEC | nix::fcntl::OFlag::O_TRUNC;
         let fd = nix::fcntl::open(ETC_RESOLV_CONF_FILE, flags, nix::sys::stat::Mode::from_bits(0o644).unwrap())?;
-        let fd = unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fd) };
         write_nameserver(fd.as_fd(), tun_gateway)?;
     }
     Ok(())

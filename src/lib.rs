@@ -123,7 +123,7 @@ pub(crate) fn compare_version(v1: &str, v2: &str) -> i32 {
     let split_parse = |ver: &str| -> Vec<i32> {
         ver.split('.')
             .filter_map(|s| s.parse::<i32>().ok())
-            .chain(std::iter::repeat(0).take(n))
+            .chain(std::iter::repeat_n(0, n))
             .collect()
     };
 
