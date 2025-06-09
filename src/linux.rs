@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 
+use futures::stream::TryStreamExt;
 use std::fs;
 use std::fs::Permissions;
 use std::net::IpAddr;
@@ -7,50 +8,304 @@ use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::str::FromStr;
 
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::BufRead;
+use std::path::Path;
+
+use rtnetlink::packet_route::route::RouteMessage;
+use rtnetlink::{Handle, IpVersion, LinkMessageBuilder, LinkUnspec, RouteMessageBuilder, new_connection};
+
 use cidr::IpCidr;
 
-use crate::{ETC_RESOLV_CONF_FILE, TproxyArgs, TproxyState, run_command};
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-fn bytes_to_string(bytes: Vec<u8>) -> std::io::Result<String> {
+use crate::{ETC_RESOLV_CONF_FILE, TproxyArgs, TproxyStateInner, run_command};
+
+static IPV6_DEFAULT_ROUTE: std::sync::LazyLock<IpCidr> = std::sync::LazyLock::new(|| IpCidr::from_str("::/0").unwrap());
+static IPV6_SPACE_LOWER: std::sync::LazyLock<IpCidr> = std::sync::LazyLock::new(|| IpCidr::from_str("::/1").unwrap());
+static IPV6_SPACE_UPPER: std::sync::LazyLock<IpCidr> = std::sync::LazyLock::new(|| IpCidr::from_str("8000::/1").unwrap());
+
+static IPV4_DEFAULT_ROUTE: std::sync::LazyLock<IpCidr> = std::sync::LazyLock::new(|| IpCidr::from_str("0.0.0.0/0").unwrap());
+static IPV4_SPACE_LOWER: std::sync::LazyLock<IpCidr> = std::sync::LazyLock::new(|| IpCidr::from_str("0.0.0.0/1").unwrap());
+static IPV4_SPACE_UPPER: std::sync::LazyLock<IpCidr> = std::sync::LazyLock::new(|| IpCidr::from_str("128.0.0.0/1").unwrap());
+
+static ROUTING_TABLE_MAIN: u32 = 254;
+
+fn bytes_to_string(bytes: Vec<u8>) -> Result<String> {
     match String::from_utf8(bytes) {
         Ok(content) => Ok(content),
-        Err(e) => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("error converting bytes to string: {}", e),
-        )),
+        Err(e) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("error converting bytes to string: {}", e)).into()),
     }
 }
 
-fn bytes_to_lines(bytes: Vec<u8>) -> std::io::Result<Vec<String>> {
-    // Convert bytes to string
-    let content = bytes_to_string(bytes)?;
-
-    // Split string into lines
-    let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-
-    Ok(lines)
-}
-
-fn route_exists(route: &str, ipv6: bool, table: &str) -> std::io::Result<bool> {
-    let args = if ipv6 {
-        ["-6", "route", "show", route, "table", table]
-    } else {
-        ["-4", "route", "show", route, "table", table]
+async fn netlink_do<F, T, R>(f: F) -> Result<R>
+where
+    F: Fn(Handle) -> T,
+    T: Future<Output = Result<R>>,
+{
+    let f = async || {
+        let (connection, handle, _) = new_connection().unwrap();
+        tokio::spawn(connection);
+        f(handle).await
     };
-    Ok(!bytes_to_string(run_command("ip", &args)?)?.trim().is_empty())
+    f().await
 }
 
-fn create_cidr(addr: IpAddr, len: u8) -> std::io::Result<IpCidr> {
+async fn ip_route_add_msg(msg: &RouteMessage) -> Result<()> {
+    netlink_do(async |handle| Ok(handle.route().add(msg.clone()).execute().await?)).await
+}
+
+async fn ip_route_add(dest: &IpCidr, dev: &str, table: u32) -> Result<RouteMessage> {
+    netlink_do(async |handle| {
+        let mut interfaces = handle.link().get().match_name(String::from(dev)).execute();
+        let index = match interfaces.try_next().await? {
+            Some(link) => link.header.index,
+            None => return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Interface not found").into()),
+        };
+
+        let route = RouteMessageBuilder::<std::net::IpAddr>::new()
+            .destination_prefix(dest.first_address(), dest.network_length())
+            .unwrap()
+            .table_id(table)
+            .output_interface(index)
+            .build();
+        handle.route().add(route.clone()).execute().await?;
+        Ok(route)
+    })
+    .await
+}
+
+async fn ip_route_flush(table: u32, ip_version: IpVersion) -> Result<()> {
+    netlink_do(async |handle| {
+        let route = match ip_version {
+            IpVersion::V4 => RouteMessageBuilder::<std::net::Ipv4Addr>::new().table_id(table).build(),
+            IpVersion::V6 => RouteMessageBuilder::<std::net::Ipv6Addr>::new().table_id(table).build(),
+        };
+        let mut routes = handle.route().get(route).execute();
+
+        while let Some(route) = routes.try_next().await? {
+            let msg = route.clone();
+            handle.route().del(msg).execute().await?
+        }
+
+        Ok(())
+    })
+    .await
+}
+
+async fn ip_route_del_msg(msg: &RouteMessage) -> Result<()> {
+    netlink_do(async |handle| Ok(handle.route().del(msg.clone()).execute().await?)).await
+}
+
+async fn ip_link_set_up(dev: &str) -> Result<()> {
+    netlink_do(async |handle| {
+        let msg = LinkMessageBuilder::<LinkUnspec>::default().name(String::from(dev)).up().build();
+        Ok(handle.link().set(msg).execute().await?)
+    })
+    .await
+}
+
+async fn ip_link_del(dev: &str) -> Result<()> {
+    netlink_do(async |handle| {
+        let mut interfaces = handle.link().get().match_name(String::from(dev)).execute();
+        let index = match interfaces.try_next().await? {
+            Some(link) => link.header.index,
+            None => return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Interface not found").into()),
+        };
+        Ok(handle.link().del(index).execute().await?)
+    })
+    .await
+}
+
+async fn ip_route_show(ip_version: IpVersion, table: u32) -> Result<Vec<RouteMessage>> {
+    netlink_do(async |handle| {
+        let route = match ip_version {
+            IpVersion::V4 => RouteMessageBuilder::<std::net::Ipv4Addr>::new().table_id(table).build(),
+            IpVersion::V6 => RouteMessageBuilder::<std::net::Ipv6Addr>::new().table_id(table).build(),
+        };
+        let mut routes = handle.route().get(route).execute();
+        let mut route_messages = Vec::new();
+        while let Some(route) = routes.try_next().await? {
+            route_messages.push(route);
+        }
+
+        // Sort routes by prefix length, the most specific route comes first.
+        route_messages.sort_by(|entry1: &RouteMessage, entry2: &RouteMessage| {
+            // If the prefix lengths are equal, we compare the priority of the routes.
+
+            let mut prio1 = 0;
+            let mut prio2 = 0;
+
+            for nla in &entry1.attributes {
+                if let rtnetlink::packet_route::route::RouteAttribute::Priority(prio) = nla {
+                    prio1 = *prio
+                }
+            }
+
+            for nla in &entry1.attributes {
+                if let rtnetlink::packet_route::route::RouteAttribute::Priority(prio) = nla {
+                    prio2 = *prio
+                }
+            }
+
+            let prio_cmp = prio1.cmp(&prio2);
+            if prio_cmp != std::cmp::Ordering::Equal {
+                return prio_cmp;
+            }
+
+            entry2
+                .header
+                .destination_prefix_length
+                .cmp(&entry1.header.destination_prefix_length)
+        });
+
+        Ok(route_messages)
+    })
+    .await
+}
+
+async fn ip_rule_add(ip_version: IpVersion, fwmark: u32, table: u32) -> Result<()> {
+    netlink_do(async |handle| {
+        if ip_version == IpVersion::V6 {
+            Ok(handle.rule().add().v6().fw_mark(fwmark).table_id(table).execute().await?)
+        } else {
+            Ok(handle.rule().add().v4().fw_mark(fwmark).table_id(table).execute().await?)
+        }
+    })
+    .await
+}
+
+async fn ip_rule_del(ip_version: IpVersion, fwmark: u32) -> Result<()> {
+    netlink_do(async |handle| {
+        let mut rules = handle.rule().get(ip_version.clone()).execute();
+        while let Some(rule) = rules.try_next().await? {
+            if rule.attributes.iter().any(|nla| {
+                if let rtnetlink::packet_route::rule::RuleAttribute::FwMark(mark) = nla {
+                    *mark == fwmark
+                } else {
+                    false
+                }
+            }) {
+                return Ok(handle.rule().del(rule).execute().await?);
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
+fn route_msg_to_cidr(msg: &rtnetlink::packet_route::route::RouteMessage) -> Result<IpCidr> {
+    let mut net_addr: Option<IpAddr> = match msg.header.address_family {
+        rtnetlink::packet_route::AddressFamily::Inet => Some(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+        rtnetlink::packet_route::AddressFamily::Inet6 => Some(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)),
+        _ => None,
+    };
+    let prefix_len = msg.header.destination_prefix_length;
+    let attrs = &msg.attributes;
+    for nla in attrs.iter() {
+        if let rtnetlink::packet_route::route::RouteAttribute::Destination(addr) = nla {
+            if let rtnetlink::packet_route::route::RouteAddress::Inet(ip) = addr {
+                net_addr = Some(IpAddr::V4(*ip));
+            } else if let rtnetlink::packet_route::route::RouteAddress::Inet6(ip) = addr {
+                net_addr = Some(IpAddr::V6(*ip));
+            }
+        }
+    }
+
+    if let Some(addr) = net_addr {
+        return create_cidr(addr, prefix_len);
+    }
+
+    Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "failed to find destination in message attributes").into())
+}
+
+fn bool_to_ip_version(is_ipv6: bool) -> IpVersion {
+    if is_ipv6 { IpVersion::V6 } else { IpVersion::V4 }
+}
+
+fn get_table_id(table_name: String) -> Result<u32> {
+    if let Ok(table_id) = u32::from_str(table_name.as_str()) {
+        return Ok(table_id);
+    }
+
+    for path in ["/etc/iproute2/rt_tables", "/usr/share/iproute2/rt_tables"] {
+        let rt_tables = parse_rt_tables(String::from(path))?;
+        if let Some(&id) = rt_tables.get(&table_name) {
+            return Ok(id);
+        }
+    }
+
+    Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("Routing table '{}' not found", table_name)).into())
+}
+
+/// Parses the /etc/iproute2/rt_tables file and returns a map of table ID to name.
+fn parse_rt_tables<P: AsRef<Path>>(path: P) -> Result<HashMap<String, u32>> {
+    let file = File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+
+    let mut table_map = HashMap::new();
+    // Defaults cf. https://github.com/iproute2/iproute2/blob/d30f38d5d752abe12174b1ea05707bcf86f3d305/lib/rt_names.c#L508
+    table_map.insert("default".to_string(), 253);
+    table_map.insert("main".to_string(), 254);
+    table_map.insert("local".to_string(), 255);
+
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.trim();
+
+        // Skip empty lines and comments
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() != 2 {
+            log::debug!("Warning: skipping malformed line: {}", line);
+            continue;
+        }
+
+        match parts[0].parse::<u32>() {
+            Ok(id) => {
+                table_map.insert(parts[1].to_string(), id);
+            }
+            Err(_) => {
+                log::debug!("Warning: invalid table ID in line: {}", line);
+            }
+        }
+    }
+
+    Ok(table_map)
+}
+
+async fn ip_route_get(route: &IpCidr, table: u32) -> Result<Option<RouteMessage>> {
+    let ip_version = bool_to_ip_version(route.is_ipv6());
+    let route_messages = ip_route_show(ip_version, table).await?;
+    for msg in route_messages {
+        let cidr = route_msg_to_cidr(&msg)?;
+        if cidr == *route {
+            return Ok(Some(msg));
+        }
+    }
+    Ok(None)
+}
+
+async fn route_exists(route: &IpCidr, table: u32) -> Result<bool> {
+    Ok(ip_route_get(route, table).await?.is_some())
+}
+
+fn create_cidr(addr: IpAddr, len: u8) -> Result<IpCidr> {
     match IpCidr::new(addr, len) {
         Ok(cidr) => Ok(cidr),
         Err(_) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("failed to convert {}/{} to CIDR", addr, len),
-        )),
+        )
+        .into()),
     }
 }
 
-fn write_buffer_to_fd(fd: std::os::fd::BorrowedFd<'_>, data: &[u8]) -> std::io::Result<()> {
+fn write_buffer_to_fd(fd: std::os::fd::BorrowedFd<'_>, data: &[u8]) -> Result<()> {
     let mut written = 0;
     loop {
         if written >= data.len() {
@@ -61,7 +316,7 @@ fn write_buffer_to_fd(fd: std::os::fd::BorrowedFd<'_>, data: &[u8]) -> std::io::
     Ok(())
 }
 
-fn write_nameserver(fd: std::os::fd::BorrowedFd<'_>, tun_gateway: Option<IpAddr>) -> std::io::Result<()> {
+fn write_nameserver(fd: std::os::fd::BorrowedFd<'_>, tun_gateway: Option<IpAddr>) -> Result<()> {
     let tun_gateway = tun_gateway.unwrap_or_else(|| "198.18.0.1".parse().unwrap());
     let data = format!("nameserver {}\n", tun_gateway);
     nix::sys::stat::fchmod(fd.as_fd(), nix::sys::stat::Mode::from_bits(0o444).unwrap())?;
@@ -77,18 +332,18 @@ fn ip_forwarding_file_path(ipv6: bool) -> &'static str {
     }
 }
 
-fn ip_fowarding_enabled(ipv6: bool) -> std::io::Result<bool> {
+fn ip_fowarding_enabled(ipv6: bool) -> Result<bool> {
     let path = ip_forwarding_file_path(ipv6);
     Ok(bytes_to_string(fs::read(path)?)?.trim() == "1")
 }
 
-fn configure_ip_forwarding(ipv6: bool, enable: bool) -> std::io::Result<()> {
+fn configure_ip_forwarding(ipv6: bool, enable: bool) -> Result<()> {
     let path = ip_forwarding_file_path(ipv6);
     fs::write(path, if enable { "1\n" } else { "0\n" })?;
     Ok(())
 }
 
-fn setup_resolv_conf(restore: &mut TproxyState) -> std::io::Result<()> {
+fn setup_resolv_conf(restore: &mut TproxyStateInner) -> Result<()> {
     let tun_gateway = restore.tproxy_args.as_ref().map(|args| args.tun_gateway);
     // We use a mount here because software like NetworkManager is known to fiddle with the
     // resolv.conf file and restore it to its original state.
@@ -123,75 +378,20 @@ fn setup_resolv_conf(restore: &mut TproxyState) -> std::io::Result<()> {
     Ok(())
 }
 
-fn route_show(is_ipv6: bool) -> std::io::Result<Vec<(IpCidr, Vec<String>)>> {
-    use std::io::{Error, ErrorKind::InvalidData};
-    let route_show_args = if is_ipv6 {
-        ["-6", "route", "show"]
-    } else {
-        ["-4", "route", "show"]
-    };
-
-    /*
-    The resulting vector, route_info, contains tuples where each tuple consists of two elements:
-    1. An IpCidr object representing the destination CIDR of the route.
-    2. A vector of strings containing components of the route obtained from the output of the ip
-       route show command (such as the gateway, interface, and other attributes associated with the
-       route).
-    */
-
-    let routes = bytes_to_lines(run_command("ip", &route_show_args)?)?;
-
-    let mut route_info = Vec::<(IpCidr, Vec<String>)>::new();
-    for line in routes {
-        if line.starts_with([' ', '\t']) {
-            continue;
-        }
-
-        let mut split = line.split_whitespace();
-        let mut dst_str = split
-            .next()
-            .ok_or(Error::new(InvalidData, format!("failed to parse route {}", line)))?;
-
-        // NOTE: ignore routes like "multicast ff00::/8 dev eth1 metric 256"
-        if dst_str == "multicast" {
-            // dst_str = split.next()..ok_or(Error::new(InvalidData, format!("failed to parse route {}", line)))?;
-            continue;
-        }
-
-        // if the first part of the route is "unreachable", we ignore it
-        if dst_str == "unreachable" {
-            continue;
-        }
-
-        if dst_str == "default" {
-            dst_str = if is_ipv6 { "::/0" } else { "0.0.0.0/0" }
-        }
-
-        let (addr_str, prefix_len_str) = match dst_str.split_once(['/']) {
-            None => (dst_str, if is_ipv6 { "128" } else { "32" }),
-            Some((addr_str, prefix_len_str)) => (addr_str, prefix_len_str),
-        };
-
-        let addr = IpAddr::from_str(addr_str)
-            .map_err(|err| Error::new(InvalidData, format!("failed to parse IP address \"{}\": {}", addr_str, err)))?;
-        let len = u8::from_str(prefix_len_str)
-            .map_err(|err| Error::new(InvalidData, format!("failed to parse prefix len \"{}\": {}", prefix_len_str, err)))?;
-        let cidr: IpCidr = create_cidr(addr, len)?;
-        let route_components: Vec<String> = split.map(String::from).collect();
-        route_info.push((cidr, route_components));
-    }
-    Ok(route_info)
-}
-
-fn do_bypass_ip(ip: &IpCidr) -> std::io::Result<bool> {
-    let mut route_info = route_show(ip.is_ipv6())?;
+async fn do_bypass_ip(state: &mut TproxyStateInner, ip: &IpCidr) -> Result<bool> {
+    let route_info = ip_route_show(bool_to_ip_version(ip.is_ipv6()), ROUTING_TABLE_MAIN).await?;
 
     let cidr = *ip;
 
-    // Sort routes by prefix length, the most specific route comes first.
-    route_info.sort_by(|entry1, entry2| entry2.0.network_length().cmp(&entry1.0.network_length()));
+    for route_message in route_info {
+        let route_cidr = match route_msg_to_cidr(&route_message) {
+            Ok(cidr) => cidr,
+            Err(_) => {
+                log::debug!("failed to convert route message to CIDR: {:?}", route_message);
+                continue;
+            }
+        };
 
-    for (route_cidr, route_components) in route_info {
         // If the route does not contain the target CIDR, it is not interesting for us.
         if !route_cidr.contains(&cidr.first_address()) || !route_cidr.contains(&cidr.last_address()) {
             continue;
@@ -203,268 +403,250 @@ fn do_bypass_ip(ip: &IpCidr) -> std::io::Result<bool> {
             break;
         }
 
-        // There is a default route which the target CIDR is routed through.
-        // Duplicate it for the CIDR as we will hijack the default route by two /1 routes later.
-        let mut proxy_route = vec!["route".into(), "add".into()];
-        proxy_route.push(cidr.to_string());
-        proxy_route.extend(route_components.into_iter());
-        run_command("ip", &proxy_route.iter().map(|s| s.as_str()).collect::<Vec<&str>>())?;
+        let mut new_route_message = route_message.clone();
+        let dst_attr = rtnetlink::packet_route::route::RouteAttribute::Destination(match cidr.first_address() {
+            IpAddr::V4(ip) => rtnetlink::packet_route::route::RouteAddress::Inet(ip),
+            IpAddr::V6(ip) => rtnetlink::packet_route::route::RouteAddress::Inet6(ip),
+        });
+        new_route_message.header.destination_prefix_length = cidr.network_length();
+
+        let mut dst_index = None;
+        new_route_message.attributes.iter().enumerate().for_each(|(i, nla)| {
+            if let rtnetlink::packet_route::route::RouteAttribute::Destination(_) = nla {
+                dst_index = Some(i);
+            }
+        });
+
+        if dst_index.is_none() {
+            new_route_message.attributes.push(dst_attr);
+        } else {
+            new_route_message.attributes[dst_index.unwrap()] = dst_attr;
+        }
+
+        ip_route_add_msg(&new_route_message).await?;
+
+        state.remove_routes.push(new_route_message);
+
         return Ok(true);
     }
     Ok(false)
 }
 
-pub fn get_route_components(cidr: &IpCidr) -> std::io::Result<Option<Vec<String>>> {
-    let routes = route_show(cidr.is_ipv6())?;
-    let matching_route = routes.iter().find(|(search_cidr, _)| search_cidr == cidr);
-    match matching_route {
-        None => Ok(None),
-        Some((_, components)) => {
-            let mut vec = Vec::new();
-            vec.push(cidr.to_string());
-            vec.extend(components.clone());
-            Ok(Some(vec))
-        }
-    }
-}
+fn setup_gateway_mode(state: &mut TproxyStateInner, tun_name: &String) -> Result<()> {
+    // sudo iptables -t nat -A POSTROUTING -o "tun_name" -j MASQUERADE
+    let args = &["-t", "nat", "-A", "POSTROUTING", "-o", tun_name.as_str(), "-j", "MASQUERADE"];
+    run_command("iptables", args)?;
 
-pub fn restore_route(route_components: &[String]) -> std::io::Result<()> {
-    let mut args = Vec::new();
-    args.push("route");
-    args.push("add");
-    args.extend(route_components.iter().map(|x| x.as_str()));
-    run_command("ip", args.as_slice())?;
+    // sudo iptables -A FORWARD -o "tun_name" -j ACCEPT
+    let args = &["-A", "FORWARD", "-o", tun_name.as_str(), "-j", "ACCEPT"];
+    run_command("iptables", args)?;
+
+    // sudo iptables -A FORWARD -i "tun_name" -o "default_interface" -m state --state RELATED,ESTABLISHED -j ACCEPT
+    let args = &[
+        "-A",
+        "FORWARD",
+        "-i",
+        tun_name.as_str(),
+        "-m",
+        "state",
+        "--state",
+        "RELATED,ESTABLISHED",
+        "-j",
+        "ACCEPT",
+    ];
+    run_command("iptables", args)?;
+
+    if !ip_fowarding_enabled(false)? {
+        log::debug!("IP forwarding not enabled");
+        configure_ip_forwarding(false, true)?;
+
+        state.restore_ip_forwarding = true;
+    }
+
+    let mut restore_gateway_mode = Vec::new();
+
+    // sudo iptables -t nat -D POSTROUTING -o "tun_name" -j MASQUERADE
+    restore_gateway_mode.push(format!("-t nat -D POSTROUTING -o {} -j MASQUERADE", tun_name));
+
+    // sudo iptables -D FORWARD -o "tun_name" -j ACCEPT
+    restore_gateway_mode.push(format!("-D FORWARD -o {} -j ACCEPT", tun_name));
+
+    // sudo iptables -D FORWARD -i "tun_name" -m state --state RELATED,ESTABLISHED -j ACCEPT
+    restore_gateway_mode.push(format!("-D FORWARD -i {} -m state --state RELATED,ESTABLISHED -j ACCEPT", tun_name));
+
+    state.restore_gateway_mode = Some(restore_gateway_mode);
+    log::debug!("restore gateway mode: {:?}", state.restore_gateway_mode);
+
     Ok(())
 }
 
-pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
+async fn setup_fwmark_table(state: &mut TproxyStateInner, tproxy_args: &TproxyArgs) -> Result<()> {
+    let fwmark = tproxy_args.socket_fwmark.unwrap();
+
+    let table = get_table_id(tproxy_args.socket_fwmark_table.clone())?;
+
+    // sudo ip rule add fwmark "mark" table "table"
+    ip_rule_add(IpVersion::V4, fwmark, table).await?;
+    ip_rule_add(IpVersion::V6, fwmark, table).await?;
+
+    // Flush the fwmark table. We just claim that table.
+    ip_route_flush(table, IpVersion::V4).await?;
+    ip_route_flush(table, IpVersion::V6).await?;
+
+    let ipv4_routes = ip_route_show(IpVersion::V4, table).await?;
+    let ipv6_routes = ip_route_show(IpVersion::V6, table).await?;
+
+    for route in ipv4_routes.iter().chain(ipv6_routes.iter()) {
+        let mut cloned_route = route.clone();
+
+        cloned_route.header.table = 0;
+
+        let mut tbl_index = None;
+        cloned_route.attributes.iter().enumerate().for_each(|(i, nla)| {
+            if let rtnetlink::packet_route::route::RouteAttribute::Table(_) = nla {
+                tbl_index = Some(i);
+            }
+        });
+
+        if let Some(tbl_index) = tbl_index {
+            cloned_route.attributes[tbl_index] = rtnetlink::packet_route::route::RouteAttribute::Table(table);
+        } else {
+            cloned_route
+                .attributes
+                .push(rtnetlink::packet_route::route::RouteAttribute::Table(table));
+        }
+
+        ip_route_add_msg(route).await?;
+    }
+
+    state.restore_socket_fwmark = Vec::from([
+        crate::FwmarkRestore {
+            ip_version: IpVersion::V4,
+            fwmark,
+            table,
+        },
+        crate::FwmarkRestore {
+            ip_version: IpVersion::V6,
+            fwmark,
+            table,
+        },
+    ]);
+    log::debug!("restore socket fwmark: {:?}", state.restore_socket_fwmark);
+
+    Ok(())
+}
+
+pub(crate) async fn _tproxy_setup(tproxy_args: &TproxyArgs) -> Result<TproxyStateInner> {
     let tun_name = &tproxy_args.tun_name;
 
-    let targs = Some(tproxy_args.clone());
-    let mut state = TproxyState {
-        tproxy_args: targs,
-        original_dns_servers: None,
-        gateway: None,
-        gw_scope: None,
-        umount_resolvconf: false,
-        restore_resolvconf_content: None,
-        tproxy_removed_done: false,
-        restore_ipv4_route: None,
-        restore_ipv6_route: None,
-        restore_gateway_mode: None,
-        restore_ip_forwarding: false,
-        restore_socket_fwmark: None,
+    let mut state: TproxyStateInner = TproxyStateInner {
+        tproxy_args: Some(tproxy_args.clone()),
+        ..Default::default()
     };
 
     flush_dns_cache()?;
 
     // check for gateway mode
     if tproxy_args.gateway_mode {
-        // sudo iptables -t nat -A POSTROUTING -o "tun_name" -j MASQUERADE
-        let args = &["-t", "nat", "-A", "POSTROUTING", "-o", tun_name.as_str(), "-j", "MASQUERADE"];
-        run_command("iptables", args)?;
-
-        // sudo iptables -A FORWARD -o "tun_name" -j ACCEPT
-        let args = &["-A", "FORWARD", "-o", tun_name.as_str(), "-j", "ACCEPT"];
-        run_command("iptables", args)?;
-
-        // sudo iptables -A FORWARD -i "tun_name" -o "default_interface" -m state --state RELATED,ESTABLISHED -j ACCEPT
-        let args = &[
-            "-A",
-            "FORWARD",
-            "-i",
-            tun_name.as_str(),
-            "-m",
-            "state",
-            "--state",
-            "RELATED,ESTABLISHED",
-            "-j",
-            "ACCEPT",
-        ];
-        run_command("iptables", args)?;
-
-        if !ip_fowarding_enabled(false)? {
-            log::debug!("IP forwarding not enabled");
-            configure_ip_forwarding(false, true)?;
-
-            state.restore_ip_forwarding = true;
-        }
-
-        let mut restore_gateway_mode = Vec::new();
-
-        // sudo iptables -t nat -D POSTROUTING -o "tun_name" -j MASQUERADE
-        restore_gateway_mode.push(format!("-t nat -D POSTROUTING -o {} -j MASQUERADE", tun_name));
-
-        // sudo iptables -D FORWARD -o "tun_name" -j ACCEPT
-        restore_gateway_mode.push(format!("-D FORWARD -o {} -j ACCEPT", tun_name));
-
-        // sudo iptables -D FORWARD -i "tun_name" -m state --state RELATED,ESTABLISHED -j ACCEPT
-        restore_gateway_mode.push(format!("-D FORWARD -i {} -m state --state RELATED,ESTABLISHED -j ACCEPT", tun_name));
-
-        state.restore_gateway_mode = Some(restore_gateway_mode);
-        log::debug!("restore gateway mode: {:?}", state.restore_gateway_mode);
+        setup_gateway_mode(&mut state, tun_name)?;
     }
 
     // check for socket fwmark
-    if let Some(fwmark) = tproxy_args.socket_fwmark {
-        let mark = format!("{}", fwmark);
-        let table = tproxy_args.socket_fwmark_table.as_str();
-
-        // sudo ip rule add fwmark "mark" table "table"
-        let args = &["rule", "add", "fwmark", mark.as_str(), "table", table];
-        run_command("ip", args)?;
-
-        // Flush the fwmark table. We just claim that table.
-        let args = &["route", "flush", "table", table];
-        let _ = run_command("ip", args);
-
-        let default_route_components = get_route_components(&IpCidr::from_str("0.0.0.0/0").unwrap())?
-            .ok_or_else(|| std::io::Error::other("failed to get default route components"))?;
-        let mut args = vec!["route", "add", "table", table];
-        args.extend(default_route_components.iter().map(|s| s.as_str()));
-        run_command("ip", &args)?;
-        log::debug!("fwmark default route: ip {}", args.join(" "));
-
-        let mut restore_socket_fwmark = Vec::new();
-
-        // sudo ip rule del fwmark "mark"
-        restore_socket_fwmark.push(format!("rule del fwmark {}", mark));
-
-        // sudo ip route flush table "table"
-        restore_socket_fwmark.push(format!("route flush table {}", table));
-        state.restore_socket_fwmark = Some(restore_socket_fwmark);
-
-        log::debug!("restore socket fwmark: {:?}", state.restore_socket_fwmark);
+    if tproxy_args.socket_fwmark.is_some() {
+        setup_fwmark_table(&mut state, tproxy_args).await?;
     }
 
     // sudo ip link set tun0 up
-    let args = &["link", "set", tun_name, "up"];
-    run_command("ip", args)?;
+    ip_link_set_up(tun_name).await?;
 
     for ip in tproxy_args.bypass_ips.iter() {
-        do_bypass_ip(ip)?;
+        do_bypass_ip(&mut state, ip).await?;
     }
+
     if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
         let cidr = IpCidr::new_host(tproxy_args.proxy_addr.ip());
-        do_bypass_ip(&cidr)?;
+        do_bypass_ip(&mut state, &cidr).await?;
     }
 
     if tproxy_args.ipv4_default_route {
-        if !route_exists("0.0.0.0/0", false, "main")? {
-            // sudo ip route add 0.0.0.0/0 dev tun0
-            let args = &["route", "add", "0.0.0.0/0", "dev", tun_name];
-            run_command("ip", args)?;
+        if !route_exists(&IPV4_DEFAULT_ROUTE, ROUTING_TABLE_MAIN).await? {
+            state
+                .remove_routes
+                .push(ip_route_add(&IPV4_DEFAULT_ROUTE, tun_name, ROUTING_TABLE_MAIN).await?);
         } else {
-            // sudo ip route add 128.0.0.0/1 dev tun0
-            let args = &["route", "add", "128.0.0.0/1", "dev", tun_name];
-            run_command("ip", args)?;
-
-            // sudo ip route add 0.0.0.0/1 dev tun0
-            let args = &["route", "add", "0.0.0.0/1", "dev", tun_name];
-            run_command("ip", args)?;
+            state
+                .remove_routes
+                .push(ip_route_add(&IPV4_SPACE_LOWER, tun_name, ROUTING_TABLE_MAIN).await?);
+            state
+                .remove_routes
+                .push(ip_route_add(&IPV4_SPACE_UPPER, tun_name, ROUTING_TABLE_MAIN).await?);
         }
     } else {
         // If IPv4 is not enabled, we do not want IPv4 traffic to bypass the proxy if a route
         // already exists.
-        state.restore_ipv4_route = get_route_components(&IpCidr::from_str("0.0.0.0/0").unwrap())?;
+        let default_route = ip_route_get(&IPV4_DEFAULT_ROUTE, ROUTING_TABLE_MAIN).await?;
 
-        log::debug!("restore ipv4 route: {:?}", state.restore_ipv4_route);
-
-        if let Err(_err) = run_command("ip", &["route", "del", "0.0.0.0/0"]) {
-            log::debug!("command \"ip route del 0.0.0.0/0\" error: {}", _err);
+        if let Some(msg) = default_route {
+            ip_route_del_msg(&msg).await?;
+            state.restore_routes.push(msg.clone());
+        } else {
+            log::debug!("no IPv4 default route found");
         }
     }
 
     if tproxy_args.ipv6_default_route {
-        if !route_exists("::/0", true, "main")? {
-            // sudo ip route add ::/0 dev tun0
-            let args = &["route", "add", "::/0", "dev", tun_name];
-            run_command("ip", args)?;
+        if !route_exists(&IPV6_DEFAULT_ROUTE, ROUTING_TABLE_MAIN).await? {
+            state
+                .remove_routes
+                .push(ip_route_add(&IPV6_DEFAULT_ROUTE, tun_name, ROUTING_TABLE_MAIN).await?);
         } else {
-            // sudo ip route add ::/1 dev tun0
-            let args = &["route", "add", "::/1", "dev", tun_name];
-            run_command("ip", args)?;
-
-            // sudo ip route add 8000::/1 dev tun0
-            let args = &["route", "add", "8000::/1", "dev", tun_name];
-            run_command("ip", args)?;
+            state
+                .remove_routes
+                .push(ip_route_add(&IPV6_SPACE_LOWER, tun_name, ROUTING_TABLE_MAIN).await?);
+            state
+                .remove_routes
+                .push(ip_route_add(&IPV6_SPACE_UPPER, tun_name, ROUTING_TABLE_MAIN).await?);
         }
     } else {
         // If IPv6 is not enabled, we do not want IPv6 traffic to bypass the proxy if a route
         // already exists.
-        state.restore_ipv6_route = get_route_components(&IpCidr::from_str("::/0").unwrap())?;
+        let default_route = ip_route_get(&IPV6_DEFAULT_ROUTE, ROUTING_TABLE_MAIN).await?;
 
-        log::debug!("restore ipv6 route: {:?}", state.restore_ipv6_route);
-
-        if let Err(_err) = run_command("ip", &["route", "del", "::/0"]) {
-            log::debug!("command \"ip route del ::/0\" error: {}", _err);
+        if let Some(msg) = default_route {
+            ip_route_del_msg(&msg).await?;
+            state.restore_routes.push(msg.clone());
+        } else {
+            log::debug!("no IPv6 default route found");
         }
     }
 
     setup_resolv_conf(&mut state)?;
 
-    #[cfg(feature = "unsafe-state-file")]
-    crate::store_intermediate_state(&state)?;
     Ok(state)
 }
 
-impl Drop for TproxyState {
-    fn drop(&mut self) {
-        log::debug!("restoring network settings");
-
-        if let Err(_e) = _tproxy_remove(self) {
-            let _pid = std::process::id();
-            log::error!("Current process \"{}\" failed to restore network settings: {}", _pid, _e);
-        }
-    }
-}
-
-pub fn tproxy_remove(state: Option<TproxyState>) -> std::io::Result<()> {
-    match state {
-        Some(mut state) => _tproxy_remove(&mut state),
-        None => {
-            #[cfg(feature = "unsafe-state-file")]
-            if let Ok(mut state) = crate::retrieve_intermediate_state() {
-                _tproxy_remove(&mut state)?;
-            }
-            Ok(())
-        }
-    }
-}
-
-pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
+pub(crate) async fn _tproxy_remove(state: &mut TproxyStateInner) -> Result<()> {
     if state.tproxy_removed_done {
         return Ok(());
     }
+
     state.tproxy_removed_done = true;
-    let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
-    let tproxy_args = state.tproxy_args.as_ref().ok_or(err)?;
-    // sudo ip route del bypass_ip/24
-    for bypass_ip in tproxy_args.bypass_ips.iter() {
-        let args = &["route", "del", &bypass_ip.to_string()];
-        if let Err(_err) = run_command("ip", args) {
-            log::debug!("command \"ip route del {}\" error: {}", bypass_ip, _err);
-        }
-    }
-    if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
-        let bypass_ip = IpCidr::new_host(tproxy_args.proxy_addr.ip());
-        let args = &["route", "del", &bypass_ip.to_string()];
-        if let Err(_err) = run_command("ip", args) {
-            log::debug!("command \"ip route del {}\" error: {}", bypass_ip, _err);
+    let tproxy_args = state
+        .tproxy_args
+        .as_ref()
+        .ok_or(std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None"))?;
+
+    for route in &state.restore_routes {
+        log::debug!("restoring route: {:?}", route);
+        if let Err(err) = ip_route_add_msg(route).await {
+            log::debug!("ip route add {:?} error: {}", route, err);
         }
     }
 
-    if let Some(components) = &state.restore_ipv4_route {
-        log::debug!("restore route: {:?}", components);
-        if let Err(_err) = restore_route(components.as_slice()) {
-            log::debug!("restore_route error: {}", _err);
-        }
-    }
-
-    if let Some(components) = &state.restore_ipv6_route {
-        log::debug!("restore route: {:?}", components);
-        if let Err(_err) = restore_route(components.as_slice()) {
-            log::debug!("restore_route error: {}", _err);
+    for route in &state.remove_routes {
+        log::debug!("removing route: {:?}", route);
+        if let Err(err) = ip_route_del_msg(route).await {
+            log::debug!("ip route del {:?} error: {}", route, err);
         }
     }
 
@@ -478,13 +660,23 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
         }
     }
 
-    if let Some(fwmark_restore) = &state.restore_socket_fwmark {
-        for restore in fwmark_restore {
-            log::debug!("restore fwmark: ip {}", restore);
+    for entry in &state.restore_socket_fwmark {
+        log::debug!(
+            "restore socket fwmark: ip rule del {} table {} (v: {:?})",
+            entry.fwmark,
+            entry.table,
+            entry.ip_version
+        );
 
-            if let Err(_err) = run_command("ip", &restore.split(' ').collect::<Vec<&str>>()) {
-                log::debug!("command \"ip {}\" error: {}", restore, _err);
-            }
+        if let Err(_err) = ip_rule_del(entry.ip_version.clone(), entry.fwmark).await {
+            log::debug!("ip_rule_del error: {}", _err);
+        }
+
+        if let Err(err) = ip_rule_del(entry.ip_version.clone(), entry.fwmark).await {
+            log::debug!("ip rule del fwmark {} (v: {:?}) error: {}", entry.fwmark, entry.ip_version, err);
+        }
+        if let Err(err) = ip_route_flush(entry.table, entry.ip_version.clone()).await {
+            log::debug!("ip route flush table {} (v: {:?}) error: {}", entry.table, entry.ip_version, err);
         }
     }
 
@@ -496,13 +688,14 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
         }
     }
 
+    log::debug!("deleting link: {}", tproxy_args.tun_name);
     // sudo ip link del tun0
-    let args = &["link", "del", &tproxy_args.tun_name];
-    if let Err(_err) = run_command("ip", args) {
-        log::debug!("command \"ip {:?}\" error: {}", args, _err);
+    if let Err(err) = ip_link_del(&tproxy_args.tun_name).await {
+        log::debug!("ip link del {} error: {}", tproxy_args.tun_name, err);
     }
 
     if state.umount_resolvconf {
+        log::debug!("unmounting {}", ETC_RESOLV_CONF_FILE);
         nix::mount::umount(ETC_RESOLV_CONF_FILE)?;
     }
 
@@ -512,53 +705,10 @@ pub(crate) fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
 
     flush_dns_cache()?;
 
-    #[cfg(feature = "unsafe-state-file")]
-    let _ = std::fs::remove_file(crate::get_state_file_path());
-
     Ok(())
 }
 
-pub(crate) fn flush_dns_cache() -> std::io::Result<()> {
+pub(crate) fn flush_dns_cache() -> Result<()> {
     // do nothing in linux
     Ok(())
-}
-
-#[allow(dead_code)]
-pub(crate) fn get_default_gateway() -> std::io::Result<(IpAddr, String)> {
-    // Command: sh -c "ip route | grep default | awk '{print $3}'"
-    let cmd = "ip route | grep default | awk '{print $3}'";
-    let out = run_command("sh", &["-c", cmd])?;
-    let stdout = String::from_utf8_lossy(&out).into_owned();
-    let addr = IpAddr::from_str(stdout.trim()).map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-
-    let cmd = "ip route | grep default | awk '{print $5}'";
-    let out = run_command("sh", &["-c", cmd])?;
-    let stdout = String::from_utf8_lossy(&out).into_owned();
-    let iface = stdout.trim().to_string();
-
-    Ok((addr, iface))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_get_default_gateway() {
-        let (addr, iface) = get_default_gateway().unwrap();
-        println!("addr: {:?}, iface: {}", addr, iface);
-    }
-
-    #[test]
-    fn test_bypass_ip() {
-        let ip = "123.45.67.89".parse().unwrap();
-        let res = do_bypass_ip(&ip);
-        println!("do_bypass_ip: {:?}", res);
-    }
-
-    #[test]
-    fn test_route_components() {
-        let components = get_route_components(&IpCidr::from_str("0.0.0.0/0").unwrap()).unwrap();
-        println!("route_components: {:?}", components);
-    }
 }

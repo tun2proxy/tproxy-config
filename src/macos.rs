@@ -13,10 +13,10 @@ use system_configuration::{
     sys::dynamic_store::SCDynamicStoreCopyValue,
 };
 
-use crate::{ETC_RESOLV_CONF_FILE, TproxyArgs, TproxyState, run_command};
+use crate::{ETC_RESOLV_CONF_FILE, TproxyArgs, TproxyStateInner, run_command};
 use std::{net::IpAddr, str::FromStr};
 
-pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
+pub(crate) async fn _tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyStateInner> {
     flush_dns_cache()?;
 
     // 0. Save the original gateway and scope
@@ -92,7 +92,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         configure_dns_servers(orig_iface_name, &service_id, &[tproxy_args.tun_gateway])?;
     }
 
-    let state = TproxyState {
+    let state = TproxyStateInner {
         tproxy_args: Some(tproxy_args.clone()),
         original_dns_servers: None,
         gateway: Some(original_gateway_0),
@@ -105,43 +105,21 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         orig_iface_name,
     };
 
-    #[cfg(feature = "unsafe-state-file")]
+    #[cfg(all(feature = "unsafe-state-file", any(target_os = "macos", target_os = "windows")))]
     crate::store_intermediate_state(&state)?;
 
     Ok(state)
 }
 
-impl Drop for TproxyState {
-    fn drop(&mut self) {
-        log::debug!("restoring network settings");
-        if let Err(_e) = _tproxy_remove(self) {
-            log::error!("failed to restore network settings: {}", _e);
-        }
-    }
-}
-
-pub fn tproxy_remove(state: Option<TproxyState>) -> std::io::Result<()> {
-    match state {
-        Some(mut state) => _tproxy_remove(&mut state),
-        None => {
-            #[cfg(feature = "unsafe-state-file")]
-            if let Ok(mut state) = crate::retrieve_intermediate_state() {
-                _tproxy_remove(&mut state)?;
-            }
-            Ok(())
-        }
-    }
-}
-
-fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
+pub(crate) async fn _tproxy_remove(state: &mut TproxyStateInner) -> std::io::Result<()> {
     if state.tproxy_removed_done {
         return Ok(());
     }
     state.tproxy_removed_done = true;
 
-    let err = std::io::Error::new(std::io::ErrorKind::Other, "No original gateway found");
+    let err = std::io::Error::other("No original gateway found");
     let original_gateway = state.gateway.take().ok_or(err)?.to_string();
-    let err = std::io::Error::new(std::io::ErrorKind::Other, "No original gateway scope found");
+    let err = std::io::Error::other("No original gateway scope found");
     let original_gw_scope = state.gw_scope.take().ok_or(err)?;
 
     if let Some(service_id) = &state.default_service_id {
@@ -187,7 +165,7 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     }
 
     // remove the record file anyway
-    #[cfg(feature = "unsafe-state-file")]
+    #[cfg(all(feature = "unsafe-state-file", any(target_os = "macos", target_os = "windows")))]
     let _ = std::fs::remove_file(crate::get_state_file_path());
 
     flush_dns_cache()?;
@@ -209,7 +187,7 @@ where
 
 macro_rules! ret_err {
     ( $x:expr ) => {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, $x))
+        return Err(std::io::Error::other($x))
     };
 }
 
@@ -331,7 +309,7 @@ fn remove_dns_servers(_service_id: &str, _friendly_name: &str) -> std::io::Resul
     let store = SCDynamicStoreBuilder::new("tproxy-config remove dns").build();
     let key: CFString = format!("State:/Network/Service/{}/DNS", _service_id).as_str().into();
     if !store.remove(key) {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, "Failed to remove DNS servers"));
+        return Err(std::io::Error::other("Failed to remove DNS servers"));
     }
     // */
     if !_friendly_name.is_empty() {

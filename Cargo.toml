@@ -1,6 +1,6 @@
 [package]
 name = "tproxy-config"
-version = "6.1.4"
+version = "7.0.0"
 edition = "2024"
 description = "Transparent proxy configuration"
 license = "MIT"
@@ -15,11 +15,13 @@ unsafe-state-file = []
 
 [dependencies]
 cidr = { version = "0.3", features = ["serde"] }
+futures = "0.3.31"
 libloading = "0.8"
 log = { version = "0.4" }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 resolv-conf = "0.7"
@@ -28,9 +30,10 @@ system-configuration = "0.6"
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.30", features = ["fs", "mount", "process"] }
 tempfile = "3"
+rtnetlink = "0.17"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.60", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_SystemServices",
     "Win32_Security_Cryptography",

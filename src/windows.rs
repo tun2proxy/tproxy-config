@@ -16,10 +16,10 @@ use windows_sys::{
     core::GUID,
 };
 
-use crate::{TproxyArgs, TproxyState, run_command};
+use crate::{TproxyArgs, TproxyStateInner, run_command};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
+pub(crate) async fn _tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyStateInner> {
     log::trace!("Setting up transparent proxy...");
 
     flush_dns_cache()?;
@@ -53,7 +53,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
 
     log::trace!("Transparent proxy setup done");
 
-    let state = TproxyState {
+    let state = TproxyStateInner {
         tproxy_args: Some(tproxy_args.clone()),
         original_dns_servers: None,
         gateway: Some(original_gateway),
@@ -62,7 +62,7 @@ pub fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
         restore_resolvconf_content: None,
         tproxy_removed_done: false,
     };
-    #[cfg(feature = "unsafe-state-file")]
+    #[cfg(all(feature = "unsafe-state-file", any(target_os = "macos", target_os = "windows")))]
     crate::store_intermediate_state(&state)?;
 
     Ok(state)
@@ -76,29 +76,7 @@ fn do_bypass_ip(bypass_ip: cidr::IpCidr, original_gateway: IpAddr) -> std::io::R
     Ok(())
 }
 
-impl Drop for TproxyState {
-    fn drop(&mut self) {
-        log::debug!("restoring network settings");
-        if let Err(_e) = _tproxy_remove(self) {
-            log::error!("failed to restore network settings: {}", _e);
-        }
-    }
-}
-
-pub fn tproxy_remove(state: Option<TproxyState>) -> std::io::Result<()> {
-    match state {
-        Some(mut state) => _tproxy_remove(&mut state),
-        None => {
-            #[cfg(feature = "unsafe-state-file")]
-            if let Ok(mut state) = crate::retrieve_intermediate_state() {
-                _tproxy_remove(&mut state)?;
-            }
-            Ok(())
-        }
-    }
-}
-
-fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
+pub(crate) async fn _tproxy_remove(state: &mut TproxyStateInner) -> std::io::Result<()> {
     if state.tproxy_removed_done {
         return Ok(());
     }
@@ -106,7 +84,7 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     let err = std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None");
     let tproxy_args = state.tproxy_args.as_ref().ok_or(err)?;
 
-    let err = std::io::Error::new(std::io::ErrorKind::Other, "No default gateway found");
+    let err = std::io::Error::other("No default gateway found");
     let original_gateway = state.gateway.take().ok_or(err)?;
     let unspecified = Ipv4Addr::UNSPECIFIED.to_string();
 
@@ -150,7 +128,7 @@ fn _tproxy_remove(state: &mut TproxyState) -> std::io::Result<()> {
     }
 
     // remove the record file anyway
-    #[cfg(feature = "unsafe-state-file")]
+    #[cfg(all(feature = "unsafe-state-file", any(target_os = "macos", target_os = "windows")))]
     let _ = std::fs::remove_file(crate::get_state_file_path());
 
     flush_dns_cache()?;
@@ -224,7 +202,7 @@ pub(crate) fn get_default_gateway_ip_by_cmd() -> std::io::Result<IpAddr> {
         Ok(gateways) => gateways,
         Err(e) => {
             let str = format!("Command \"powershell -Command {}\" error: {}", cmd, e);
-            let err = std::io::Error::new(std::io::ErrorKind::Other, str);
+            let err = std::io::Error::other(str);
             return Err(err);
         }
     };
@@ -249,7 +227,7 @@ pub(crate) fn get_default_gateway_ip_by_cmd() -> std::io::Result<IpAddr> {
         }
     }
 
-    let err = std::io::Error::new(std::io::ErrorKind::Other, "No default gateway found");
+    let err = std::io::Error::other("No default gateway found");
     ipv4_gateway.or(ipv6_gateway).ok_or(err)
 }
 
@@ -260,7 +238,7 @@ pub(crate) fn get_default_gateway_interface() -> std::io::Result<String> {
         Ok(iface) => iface,
         Err(e) => {
             let str = format!("Command \"powershell -Command {}\" error: {}", cmd, e);
-            let err = std::io::Error::new(std::io::ErrorKind::Other, str);
+            let err = std::io::Error::other(str);
             return Err(err);
         }
     };
@@ -314,7 +292,7 @@ pub fn get_active_network_interface_gateways() -> std::io::Result<Vec<IpAddr>> {
         Ok(())
     })?;
     if addrs.is_empty() {
-        Err(std::io::Error::new(std::io::ErrorKind::Other, "No gateway found"))
+        Err(std::io::Error::other("No gateway found"))
     } else {
         Ok(addrs)
     }
@@ -358,11 +336,10 @@ where
 }
 
 pub(crate) unsafe fn sockaddr_to_socket_addr(sock_addr: *const SOCKADDR) -> std::io::Result<SocketAddr> {
-    use std::io::{Error, ErrorKind};
     let address = match (unsafe { *sock_addr }).sa_family {
         AF_INET => unsafe { sockaddr_in_to_socket_addr(&*(sock_addr as *const SOCKADDR_IN)) },
         AF_INET6 => unsafe { sockaddr_in6_to_socket_addr(&*(sock_addr as *const SOCKADDR_IN6)) },
-        _ => return Err(Error::new(ErrorKind::Other, "Unsupported address type")),
+        _ => return Err(std::io::Error::other("Unsupported address type")),
     };
     Ok(address)
 }
