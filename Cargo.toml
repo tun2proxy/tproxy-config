@@ -10,8 +10,9 @@ keywords = ["tun", "network", "tunnel", "transparent", "proxy"]
 readme = "readme.md"
 
 [features]
-default = []
 unsafe-state-file = []
+
+# default = ["unsafe-state-file"]
 
 [dependencies]
 cidr = { version = "0.3", features = ["serde"] }
@@ -23,14 +24,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.30", features = ["fs", "mount", "process"] }
+rtnetlink = "0.17"
+tempfile = "3"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 resolv-conf = "0.7"
 system-configuration = "0.6"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.30", features = ["fs", "mount", "process"] }
-tempfile = "3"
-rtnetlink = "0.17"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.60", features = [

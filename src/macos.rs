@@ -86,7 +86,7 @@ pub(crate) async fn _tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<T
         let file = std::fs::OpenOptions::new().write(true).truncate(true).open(ETC_RESOLV_CONF_FILE)?;
         let mut writer = std::io::BufWriter::new(file);
         use std::io::Write;
-        writeln!(writer, "nameserver {}\n", tun_gateway)?;
+        writeln!(writer, "nameserver {tun_gateway}\n")?;
 
         let orig_iface_name = orig_iface_name.as_deref().unwrap_or("");
         configure_dns_servers(orig_iface_name, &service_id, &[tproxy_args.tun_gateway])?;
@@ -126,10 +126,10 @@ pub(crate) async fn _tproxy_remove(state: &mut TproxyStateInner) -> std::io::Res
         let iface_friendly_name = state.orig_iface_name.as_deref().unwrap_or("");
         if let Some(default_service_dns) = &state.default_service_dns {
             if let Err(_err) = configure_dns_servers(iface_friendly_name, service_id, default_service_dns.as_slice()) {
-                log::debug!("restore original dns servers error: {}", _err);
+                log::debug!("restore original dns servers error: {_err}");
             }
         } else if let Err(e) = remove_dns_servers(service_id, iface_friendly_name) {
-            log::debug!("failed to remove DNS servers: {}", e);
+            log::debug!("failed to remove DNS servers: {e}");
         }
     }
 
@@ -151,13 +151,13 @@ pub(crate) async fn _tproxy_remove(state: &mut TproxyStateInner) -> std::io::Res
     // route delete default -ifscope original_gw_scope
     // route add default original_gateway
     if let Err(_err) = run_command("route", &["delete", "default"]) {
-        log::debug!("command \"route delete default\" error: {}", _err);
+        log::debug!("command \"route delete default\" error: {_err}");
     }
     if let Err(_err) = run_command("route", &["delete", "default", "-ifscope", &original_gw_scope]) {
-        log::debug!("command \"route delete default -ifscope {}\" error: {}", original_gw_scope, _err);
+        log::debug!("command \"route delete default -ifscope {original_gw_scope}\" error: {_err}");
     }
     if let Err(_err) = run_command("route", &["add", "default", &original_gateway]) {
-        log::debug!("command \"route add default {}\" error: {}", original_gateway, _err);
+        log::debug!("command \"route add default {original_gateway}\" error: {_err}");
     }
 
     if let Some(data) = &state.restore_resolvconf_content {
@@ -185,38 +185,32 @@ where
     property_list.downcast::<T>()
 }
 
-macro_rules! ret_err {
-    ( $x:expr ) => {
-        return Err(std::io::Error::other($x))
-    };
-}
-
 /// The path strings can be found in command `scutil` with subcommand `list`.
 ///
 /// Get the gatway IP, name, service ID, friendly name of the default interface.
 pub(crate) fn get_default_iface_params() -> std::io::Result<(IpAddr, String, String, Option<String>)> {
     let store = SCDynamicStoreBuilder::new("tproxy-config get iface params").build();
     let Some(property_list) = store.get("State:/Network/Global/IPv4") else {
-        ret_err!("Failed to get network state")
+        return Err(std::io::Error::other("Failed to get network state"));
     };
     let Some(dict) = property_list.downcast::<CFDictionary>() else {
-        ret_err!("Dictionary conversion failed")
+        return Err(std::io::Error::other("Dictionary conversion failed"));
     };
     let Some(gateway) = get_cf_dict_entry::<CFString>(&dict, "Router".into()) else {
-        ret_err!("Failed to get default gateway")
+        return Err(std::io::Error::other("Failed to get default gateway"));
     };
     let Some(interface) = get_cf_dict_entry::<CFString>(&dict, "PrimaryInterface".into()) else {
-        ret_err!("Failed to get default interface")
+        return Err(std::io::Error::other("Failed to get default interface"));
     };
     let Some(service_id) = get_cf_dict_entry::<CFString>(&dict, "PrimaryService".into()) else {
-        ret_err!("Failed to get default service")
+        return Err(std::io::Error::other("Failed to get default service"));
     };
 
     use std::io::{Error, ErrorKind::InvalidData};
     let gateway_ip = IpAddr::from_str(gateway.to_string().as_str()).map_err(|err| Error::new(InvalidData, err))?;
 
     let mut iface_name = None;
-    let svc_path: CFString = format!("Setup:/Network/Service/{}", service_id).as_str().into();
+    let svc_path: CFString = format!("Setup:/Network/Service/{service_id}").as_str().into();
     if let Some(service_dict) = unsafe { SCDynamicStoreCopyValue(store.as_concrete_TypeRef(), svc_path.as_concrete_TypeRef()).as_ref() }
         .and_then(|plist| unsafe { CFPropertyList::wrap_under_create_rule(plist) }.downcast::<CFDictionary>())
     {
@@ -263,14 +257,14 @@ fn configure_dns_servers(iface_friendly_name: &str, service_id: &str, dns_server
 /// Overridden DNS servers are returned as a vector.
 fn get_dns_servers(service_id: &String) -> std::io::Result<Option<Vec<IpAddr>>> {
     let store = SCDynamicStoreBuilder::new("tproxy-config get dns").build();
-    let key: CFString = format!("State:/Network/Service/{}/DNS", service_id).as_str().into();
+    let key: CFString = format!("State:/Network/Service/{service_id}/DNS").as_str().into();
 
     let Some(result) = store.get(key) else {
         return Ok(None);
     };
 
     let Some(cf_dict) = result.downcast::<CFDictionary>() else {
-        ret_err!("Network service DNS server conversion failed");
+        return Err(std::io::Error::other("Network service DNS server conversion failed"));
     };
 
     let Some(server_addresses) = cf_dict.find(CFString::from("ServerAddresses").as_CFTypeRef()) else {
@@ -278,12 +272,12 @@ fn get_dns_servers(service_id: &String) -> std::io::Result<Option<Vec<IpAddr>>> 
     };
 
     if server_addresses.is_null() {
-        ret_err!("Server addresses are null");
+        return Err(std::io::Error::other("Server addresses are null"));
     }
 
     let server_addr_prop = unsafe { CFPropertyList::wrap_under_get_rule(*server_addresses) };
     let Some(cf_array) = server_addr_prop.downcast::<CFArray>() else {
-        ret_err!("Server address conversion failed");
+        return Err(std::io::Error::other("Server address conversion failed"));
     };
 
     let mut vec: Vec<IpAddr> = Vec::new();

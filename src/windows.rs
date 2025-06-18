@@ -93,7 +93,7 @@ pub(crate) async fn _tproxy_remove(state: &mut TproxyStateInner) -> std::io::Res
     let gateway = tproxy_args.tun_gateway.to_string();
     let args = &["-p", "delete", &unspecified, "mask", &unspecified, &gateway];
     if let Err(_err) = run_command("route", args) {
-        log::debug!("command \"route {:?}\" error: {}", args, _err);
+        log::debug!("command \"route {args:?}\" error: {_err}");
     }
 
     // Remove bypass ips
@@ -101,14 +101,14 @@ pub(crate) async fn _tproxy_remove(state: &mut TproxyStateInner) -> std::io::Res
     for bypass_ip in tproxy_args.bypass_ips.iter() {
         let args = &["delete", &bypass_ip.to_string()];
         if let Err(_err) = run_command("route", args) {
-            log::debug!("command \"route {:?}\" error: {}", args, _err);
+            log::debug!("command \"route {args:?}\" error: {_err}");
         }
     }
     if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
         let bypass_ip = cidr::IpCidr::new_host(tproxy_args.proxy_addr.ip());
         let args = &["delete", &bypass_ip.to_string()];
         if let Err(_err) = run_command("route", args) {
-            log::debug!("command \"route {:?}\" error: {}", args, _err);
+            log::debug!("command \"route {args:?}\" error: {_err}");
         }
     }
 
@@ -116,7 +116,7 @@ pub(crate) async fn _tproxy_remove(state: &mut TproxyStateInner) -> std::io::Res
     // command: `route delete 0.0.0.0 mask 0.0.0.0`
     let args = &["delete", &unspecified, "mask", &unspecified];
     if let Err(_err) = run_command("route", args) {
-        log::debug!("command \"route {:?}\" error: {}", args, _err);
+        log::debug!("command \"route {args:?}\" error: {_err}");
     }
 
     // 2. Add back the original gateway route
@@ -124,7 +124,7 @@ pub(crate) async fn _tproxy_remove(state: &mut TproxyStateInner) -> std::io::Res
     let original_gateway = original_gateway.to_string();
     let args = &["add", &unspecified, "mask", &unspecified, &original_gateway, "metric", "200"];
     if let Err(_err) = run_command("route", args) {
-        log::debug!("command \"route {:?}\" error: {}", args, _err);
+        log::debug!("command \"route {args:?}\" error: {_err}");
     }
 
     // remove the record file anyway
@@ -190,7 +190,7 @@ pub(crate) fn get_default_gateway_ip() -> std::io::Result<IpAddr> {
     match get_active_network_interface_gateways().map(|gateways| gateways[0]) {
         Ok(gateway) => Ok(gateway),
         Err(e) => {
-            log::debug!("Failed to get default gateway by GetAdaptersAddresses: {}", e);
+            log::debug!("Failed to get default gateway by GetAdaptersAddresses: {e}");
             get_default_gateway_ip_by_cmd()
         }
     }
@@ -201,7 +201,7 @@ pub(crate) fn get_default_gateway_ip_by_cmd() -> std::io::Result<IpAddr> {
     let gateways = match run_command("powershell", &["-Command", cmd]) {
         Ok(gateways) => gateways,
         Err(e) => {
-            let str = format!("Command \"powershell -Command {}\" error: {}", cmd, e);
+            let str = format!("Command \"powershell -Command {cmd}\" error: {e}");
             let err = std::io::Error::other(str);
             return Err(err);
         }
@@ -237,7 +237,7 @@ pub(crate) fn get_default_gateway_interface() -> std::io::Result<String> {
     let iface = match run_command("powershell", &["-Command", cmd]) {
         Ok(iface) => iface,
         Err(e) => {
-            let str = format!("Command \"powershell -Command {}\" error: {}", cmd, e);
+            let str = format!("Command \"powershell -Command {cmd}\" error: {e}");
             let err = std::io::Error::other(str);
             return Err(err);
         }
@@ -364,9 +364,9 @@ mod tests {
     #[test]
     fn test_get_default_gateway() {
         let (addr, iface) = get_default_gateway().unwrap();
-        println!("addr: {:?}, iface: {}", addr, iface);
+        println!("addr: {addr:?}, iface: {iface}");
 
         let gw = get_active_network_interface_gateways().unwrap();
-        println!("gateways: {:?}", gw);
+        println!("gateways: {gw:?}");
     }
 }

@@ -35,7 +35,7 @@ static ROUTING_TABLE_MAIN: u32 = 254;
 fn bytes_to_string(bytes: Vec<u8>) -> Result<String> {
     match String::from_utf8(bytes) {
         Ok(content) => Ok(content),
-        Err(e) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("error converting bytes to string: {}", e)).into()),
+        Err(e) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("error converting bytes to string: {e}")).into()),
     }
 }
 
@@ -236,7 +236,7 @@ fn get_table_id(table_name: String) -> Result<u32> {
         }
     }
 
-    Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("Routing table '{}' not found", table_name)).into())
+    Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("Routing table '{table_name}' not found")).into())
 }
 
 /// Parses the /etc/iproute2/rt_tables file and returns a map of table ID to name.
@@ -261,7 +261,7 @@ fn parse_rt_tables<P: AsRef<Path>>(path: P) -> Result<HashMap<String, u32>> {
 
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() != 2 {
-            log::debug!("Warning: skipping malformed line: {}", line);
+            log::debug!("Warning: skipping malformed line: {line}");
             continue;
         }
 
@@ -270,7 +270,7 @@ fn parse_rt_tables<P: AsRef<Path>>(path: P) -> Result<HashMap<String, u32>> {
                 table_map.insert(parts[1].to_string(), id);
             }
             Err(_) => {
-                log::debug!("Warning: invalid table ID in line: {}", line);
+                log::debug!("Warning: invalid table ID in line: {line}");
             }
         }
     }
@@ -297,11 +297,7 @@ async fn route_exists(route: &IpCidr, table: u32) -> Result<bool> {
 fn create_cidr(addr: IpAddr, len: u8) -> Result<IpCidr> {
     match IpCidr::new(addr, len) {
         Ok(cidr) => Ok(cidr),
-        Err(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("failed to convert {}/{} to CIDR", addr, len),
-        )
-        .into()),
+        Err(_) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("failed to convert {addr}/{len} to CIDR")).into()),
     }
 }
 
@@ -387,7 +383,7 @@ async fn do_bypass_ip(state: &mut TproxyStateInner, ip: &IpCidr) -> Result<bool>
         let route_cidr = match route_msg_to_cidr(&route_message) {
             Ok(cidr) => cidr,
             Err(_) => {
-                log::debug!("failed to convert route message to CIDR: {:?}", route_message);
+                log::debug!("failed to convert route message to CIDR: {route_message:?}");
                 continue;
             }
         };
@@ -466,13 +462,13 @@ fn setup_gateway_mode(state: &mut TproxyStateInner, tun_name: &String) -> Result
     let mut restore_gateway_mode = Vec::new();
 
     // sudo iptables -t nat -D POSTROUTING -o "tun_name" -j MASQUERADE
-    restore_gateway_mode.push(format!("-t nat -D POSTROUTING -o {} -j MASQUERADE", tun_name));
+    restore_gateway_mode.push(format!("-t nat -D POSTROUTING -o {tun_name} -j MASQUERADE"));
 
     // sudo iptables -D FORWARD -o "tun_name" -j ACCEPT
-    restore_gateway_mode.push(format!("-D FORWARD -o {} -j ACCEPT", tun_name));
+    restore_gateway_mode.push(format!("-D FORWARD -o {tun_name} -j ACCEPT"));
 
     // sudo iptables -D FORWARD -i "tun_name" -m state --state RELATED,ESTABLISHED -j ACCEPT
-    restore_gateway_mode.push(format!("-D FORWARD -i {} -m state --state RELATED,ESTABLISHED -j ACCEPT", tun_name));
+    restore_gateway_mode.push(format!("-D FORWARD -i {tun_name} -m state --state RELATED,ESTABLISHED -j ACCEPT"));
 
     state.restore_gateway_mode = Some(restore_gateway_mode);
     log::debug!("restore gateway mode: {:?}", state.restore_gateway_mode);
@@ -639,23 +635,23 @@ pub(crate) async fn _tproxy_remove(state: &mut TproxyStateInner) -> Result<()> {
     for route in &state.restore_routes {
         log::debug!("restoring route: {:?}", route);
         if let Err(err) = ip_route_add_msg(route).await {
-            log::debug!("ip route add {:?} error: {}", route, err);
+            log::debug!("ip route add {route:?} error: {err}");
         }
     }
 
     for route in &state.remove_routes {
         log::debug!("removing route: {:?}", route);
         if let Err(err) = ip_route_del_msg(route).await {
-            log::debug!("ip route del {:?} error: {}", route, err);
+            log::debug!("ip route del {route:?} error: {err}");
         }
     }
 
     if let Some(gateway_restore) = &state.restore_gateway_mode {
         for restore in gateway_restore {
-            log::debug!("restore gateway mode: iptables {}", restore);
+            log::debug!("restore gateway mode: iptables {restore}");
 
             if let Err(_err) = run_command("iptables", &restore.split(' ').collect::<Vec<&str>>()) {
-                log::debug!("command \"iptables {}\" error: {}", restore, _err);
+                log::debug!("command \"iptables {restore}\" error: {_err}");
             }
         }
     }
@@ -669,14 +665,14 @@ pub(crate) async fn _tproxy_remove(state: &mut TproxyStateInner) -> Result<()> {
         );
 
         if let Err(_err) = ip_rule_del(entry.ip_version.clone(), entry.fwmark).await {
-            log::debug!("ip_rule_del error: {}", _err);
+            log::debug!("ip_rule_del error: {_err}");
         }
 
         if let Err(err) = ip_rule_del(entry.ip_version.clone(), entry.fwmark).await {
-            log::debug!("ip rule del fwmark {} (v: {:?}) error: {}", entry.fwmark, entry.ip_version, err);
+            log::debug!("ip rule del fwmark {} (v: {:?}) error: {err}", entry.fwmark, entry.ip_version);
         }
         if let Err(err) = ip_route_flush(entry.table, entry.ip_version.clone()).await {
-            log::debug!("ip route flush table {} (v: {:?}) error: {}", entry.table, entry.ip_version, err);
+            log::debug!("ip route flush table {} (v: {:?}) error: {err}", entry.table, entry.ip_version);
         }
     }
 
@@ -684,14 +680,14 @@ pub(crate) async fn _tproxy_remove(state: &mut TproxyStateInner) -> Result<()> {
         log::debug!("restore ip forwarding");
 
         if let Err(_err) = configure_ip_forwarding(false, false) {
-            log::debug!("error restoring IP forwarding: {}", _err);
+            log::debug!("error restoring IP forwarding: {_err}");
         }
     }
 
     log::debug!("deleting link: {}", tproxy_args.tun_name);
     // sudo ip link del tun0
     if let Err(err) = ip_link_del(&tproxy_args.tun_name).await {
-        log::debug!("ip link del {} error: {}", tproxy_args.tun_name, err);
+        log::debug!("ip link del {} error: {err}", tproxy_args.tun_name);
     }
 
     if state.umount_resolvconf {
