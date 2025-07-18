@@ -44,12 +44,12 @@ where
     F: Fn(Handle) -> T,
     T: Future<Output = Result<R>>,
 {
-    let f = async || {
-        let (connection, handle, _) = new_connection().unwrap();
+    let action = async || {
+        let (connection, handle, _) = new_connection()?;
         tokio::spawn(connection);
         f(handle).await
     };
-    f().await
+    action().await
 }
 
 async fn ip_route_add_msg(msg: &RouteMessage) -> Result<()> {
@@ -65,8 +65,7 @@ async fn ip_route_add(dest: &IpCidr, dev: &str, table: u32) -> Result<RouteMessa
         };
 
         let route = RouteMessageBuilder::<std::net::IpAddr>::new()
-            .destination_prefix(dest.first_address(), dest.network_length())
-            .unwrap()
+            .destination_prefix(dest.first_address(), dest.network_length())?
             .table_id(table)
             .output_interface(index)
             .build();
@@ -413,10 +412,9 @@ async fn do_bypass_ip(state: &mut TproxyStateInner, ip: &IpCidr) -> Result<bool>
             }
         });
 
-        if dst_index.is_none() {
-            new_route_message.attributes.push(dst_attr);
-        } else {
-            new_route_message.attributes[dst_index.unwrap()] = dst_attr;
+        match dst_index {
+            Some(index) => new_route_message.attributes[index] = dst_attr,
+            None => new_route_message.attributes.push(dst_attr),
         }
 
         ip_route_add_msg(&new_route_message).await?;
@@ -477,7 +475,9 @@ fn setup_gateway_mode(state: &mut TproxyStateInner, tun_name: &String) -> Result
 }
 
 async fn setup_fwmark_table(state: &mut TproxyStateInner, tproxy_args: &TproxyArgs) -> Result<()> {
-    let fwmark = tproxy_args.socket_fwmark.unwrap();
+    let Some(fwmark) = tproxy_args.socket_fwmark else {
+        return Err(Box::new(std::io::Error::other("fwmark is None")));
+    };
 
     let table = get_table_id(tproxy_args.socket_fwmark_table.clone())?;
 
