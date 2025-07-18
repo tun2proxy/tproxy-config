@@ -54,7 +54,7 @@ pub(crate) fn run_command(command: &str, args: &[&str]) -> std::io::Result<Vec<u
     if !out.status.success() {
         let err = String::from_utf8_lossy(if out.stderr.is_empty() { &out.stdout } else { &out.stderr });
         let info = format!("Run command: \"{full_cmd}\" failed with {err}");
-        log::trace!("{}", info);
+        log::trace!("{info}");
         return Err(std::io::Error::other(info));
     }
     Ok(out.stdout)

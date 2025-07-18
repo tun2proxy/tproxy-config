@@ -22,15 +22,15 @@ impl Drop for TproxyState {
 }
 
 pub async fn tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<TproxyState> {
-    log::debug!("Setting up TProxy with args: {:?}", tproxy_args);
+    log::debug!("Setting up TProxy with args: {tproxy_args:?}");
     match _tproxy_setup(tproxy_args).await {
         Ok(state) => {
             log::debug!("TProxy setup completed successfully");
             Ok(TproxyState::new(state))
         }
         Err(e) => {
-            log::error!("Failed to set up TProxy: {}", e);
-            Err(std::io::Error::other(format!("{}", e)))
+            log::error!("Failed to set up TProxy: {e}");
+            Err(std::io::Error::other(format!("{e}")))
         }
     }
 }
@@ -40,16 +40,12 @@ pub async fn tproxy_remove(state: Option<TproxyState>) -> std::io::Result<()> {
         Some(state) => {
             let inner = state.inner.clone();
             let mut state = inner.lock().await;
-            return _tproxy_remove(&mut state)
-                .await
-                .map_err(|e| std::io::Error::other(format!("{}", e)));
+            return _tproxy_remove(&mut state).await.map_err(|e| std::io::Error::other(format!("{e}")));
         }
         #[cfg(all(feature = "unsafe-state-file", any(target_os = "macos", target_os = "windows")))]
         None => {
             if let Ok(mut state) = crate::retrieve_intermediate_state() {
-                return _tproxy_remove(&mut state)
-                    .await
-                    .map_err(|e| std::io::Error::other(format!("{}", e)));
+                return _tproxy_remove(&mut state).await.map_err(|e| std::io::Error::other(format!("{e}")));
             }
             Ok(())
         }

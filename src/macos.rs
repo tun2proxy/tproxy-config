@@ -73,7 +73,7 @@ pub(crate) async fn _tproxy_setup(tproxy_args: &TproxyArgs) -> std::io::Result<T
     let default_service_dns = match get_dns_servers(&service_id) {
         Ok(servers) => servers,
         Err(msg) => {
-            log::error!("failed to get DNS servers of default interface: {}", msg);
+            log::error!("failed to get DNS servers of default interface: {msg}");
             None
         }
     };
@@ -234,7 +234,7 @@ fn configure_dns_servers(iface_friendly_name: &str, service_id: &str, dns_server
     dns_servers.iter().for_each(|x| dns_server_vec.push(x.to_string().as_str().into()));
     let dns_server_array = CFArray::from_CFTypes(dns_server_vec.as_slice());
     let dns_dict = CFDictionary::from_CFType_pairs(&[(CFString::from("ServerAddresses"), dns_server_array)]);
-    let key = format!("State:/Network/Service/{}/DNS", service_id).as_str().into();
+    let key = format!("State:/Network/Service/{service_id}/DNS").as_str().into();
     if !store.set::<CFString, CFDictionary>(key, dns_dict.to_untyped()) {
         log::error!("Failed to set DNS servers");
     }

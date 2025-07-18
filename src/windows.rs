@@ -150,7 +150,7 @@ pub(crate) fn set_dns_server(iface: &str, dns_server: IpAddr) -> std::io::Result
     let Some(set_dns_fn) = SetInterfaceDnsSettings() else {
         // command: `netsh interface ip set dns "utun3" static 10.0.0.1`
         // or command: `powershell Set-DnsClientServerAddress -InterfaceAlias "utun3" -ServerAddresses ("10.0.0.1")`
-        let tun_name = format!("\"{}\"", iface);
+        let tun_name = format!("\"{iface}\"");
         let args = &["interface", "ip", "set", "dns", &tun_name, "static", &dns_server.to_string()];
         run_command("netsh", args)?;
         return Ok(());

@@ -313,7 +313,7 @@ fn write_buffer_to_fd(fd: std::os::fd::BorrowedFd<'_>, data: &[u8]) -> Result<()
 
 fn write_nameserver(fd: std::os::fd::BorrowedFd<'_>, tun_gateway: Option<IpAddr>) -> Result<()> {
     let tun_gateway = tun_gateway.unwrap_or_else(|| "198.18.0.1".parse().unwrap());
-    let data = format!("nameserver {}\n", tun_gateway);
+    let data = format!("nameserver {tun_gateway}\n");
     nix::sys::stat::fchmod(fd.as_fd(), nix::sys::stat::Mode::from_bits(0o444).unwrap())?;
     write_buffer_to_fd(fd, data.as_bytes())?;
     Ok(())
@@ -633,14 +633,14 @@ pub(crate) async fn _tproxy_remove(state: &mut TproxyStateInner) -> Result<()> {
         .ok_or(std::io::Error::new(std::io::ErrorKind::InvalidData, "tproxy_args is None"))?;
 
     for route in &state.restore_routes {
-        log::debug!("restoring route: {:?}", route);
+        log::debug!("restoring route: {route:?}");
         if let Err(err) = ip_route_add_msg(route).await {
             log::debug!("ip route add {route:?} error: {err}");
         }
     }
 
     for route in &state.remove_routes {
-        log::debug!("removing route: {:?}", route);
+        log::debug!("removing route: {route:?}");
         if let Err(err) = ip_route_del_msg(route).await {
             log::debug!("ip route del {route:?} error: {err}");
         }
@@ -691,7 +691,7 @@ pub(crate) async fn _tproxy_remove(state: &mut TproxyStateInner) -> Result<()> {
     }
 
     if state.umount_resolvconf {
-        log::debug!("unmounting {}", ETC_RESOLV_CONF_FILE);
+        log::debug!("unmounting {ETC_RESOLV_CONF_FILE}");
         nix::mount::umount(ETC_RESOLV_CONF_FILE)?;
     }
 
