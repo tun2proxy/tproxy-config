@@ -56,14 +56,20 @@ async fn ip_route_add_msg(msg: &RouteMessage) -> Result<()> {
     netlink_do(async |handle| Ok(handle.route().add(msg.clone()).execute().await?)).await
 }
 
-async fn ip_route_add(dest: &IpCidr, dev: &str, table: u32) -> Result<RouteMessage> {
+async fn ip_link_get_index(dev: &str) -> Result<u32> {
     netlink_do(async |handle| {
         let mut interfaces = handle.link().get().match_name(String::from(dev)).execute();
-        let index = match interfaces.try_next().await? {
-            Some(link) => link.header.index,
-            None => return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Interface not found").into()),
-        };
+        match interfaces.try_next().await? {
+            Some(link) => Ok(link.header.index),
+            None => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Interface not found").into()),
+        }
+    })
+    .await
+}
 
+async fn ip_route_add(dest: &IpCidr, dev: &str, table: u32) -> Result<RouteMessage> {
+    let index = ip_link_get_index(dev).await?;
+    netlink_do(async |handle| {
         let route = RouteMessageBuilder::<std::net::IpAddr>::new()
             .destination_prefix(dest.first_address(), dest.network_length())?
             .table_id(table)
@@ -106,15 +112,8 @@ async fn ip_link_set_up(dev: &str) -> Result<()> {
 }
 
 async fn ip_link_del(dev: &str) -> Result<()> {
-    netlink_do(async |handle| {
-        let mut interfaces = handle.link().get().match_name(String::from(dev)).execute();
-        let index = match interfaces.try_next().await? {
-            Some(link) => link.header.index,
-            None => return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Interface not found").into()),
-        };
-        Ok(handle.link().del(index).execute().await?)
-    })
-    .await
+    let index = ip_link_get_index(dev).await?;
+    netlink_do(async |handle| Ok(handle.link().del(index).execute().await?)).await
 }
 
 async fn ip_route_show(ip_version: IpVersion, table: u32) -> Result<Vec<RouteMessage>> {
@@ -277,20 +276,23 @@ fn parse_rt_tables<P: AsRef<Path>>(path: P) -> Result<HashMap<String, u32>> {
     Ok(table_map)
 }
 
-async fn ip_route_get(route: &IpCidr, table: u32) -> Result<Option<RouteMessage>> {
-    let ip_version = bool_to_ip_version(route.is_ipv6());
+/// Retrieves a route message for the given CIDR and routing table.
+async fn ip_route_get(search_cidr: &IpCidr, table: u32, strict: bool) -> Result<Option<RouteMessage>> {
+    let ip_version = bool_to_ip_version(search_cidr.is_ipv6());
     let route_messages = ip_route_show(ip_version, table).await?;
     for msg in route_messages {
-        let cidr = route_msg_to_cidr(&msg)?;
-        if cidr == *route {
+        let route_cidr = route_msg_to_cidr(&msg)?;
+        if strict && route_cidr == *search_cidr
+            || !strict && route_cidr.contains(&search_cidr.first_address()) && route_cidr.contains(&search_cidr.last_address())
+        {
             return Ok(Some(msg));
         }
     }
     Ok(None)
 }
 
-async fn route_exists(route: &IpCidr, table: u32) -> Result<bool> {
-    Ok(ip_route_get(route, table).await?.is_some())
+async fn route_exists(route: &IpCidr, table: u32, strict: bool) -> Result<bool> {
+    Ok(ip_route_get(route, table, strict).await?.is_some())
 }
 
 fn create_cidr(addr: IpAddr, len: u8) -> Result<IpCidr> {
@@ -417,9 +419,22 @@ async fn do_bypass_ip(state: &mut TproxyStateInner, ip: &IpCidr) -> Result<bool>
             None => new_route_message.attributes.push(dst_attr),
         }
 
-        ip_route_add_msg(&new_route_message).await?;
+        let result = ip_route_add_msg(&new_route_message).await;
+        let mut route_exists = false;
 
-        state.remove_routes.push(new_route_message);
+        if let Err(err) = &result {
+            if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+                route_exists = io_err.kind() == std::io::ErrorKind::AlreadyExists;
+            }
+            result?;
+        }
+
+        if !route_exists {
+            log::debug!("added bypass route: {new_route_message:?}");
+            state.remove_routes.push(new_route_message);
+        } else {
+            log::debug!("bypass route already exists: {new_route_message:?}");
+        }
 
         return Ok(true);
     }
@@ -532,40 +547,60 @@ async fn setup_fwmark_table(state: &mut TproxyStateInner, tproxy_args: &TproxyAr
     Ok(())
 }
 
-pub(crate) async fn _tproxy_setup(tproxy_args: &TproxyArgs) -> Result<TproxyStateInner> {
+async fn detect_routing_loop(proxy_cidr: &IpCidr, tun_name: &str) -> Result<()> {
+    let tun_interface_id = ip_link_get_index(tun_name).await?;
+    log::debug!("tun ({tun_name}) interface id: {tun_interface_id}");
+    let mut routing_loop = false;
+
+    let proxy_route = ip_route_get(proxy_cidr, ROUTING_TABLE_MAIN, false).await?;
+    if let Some(route) = proxy_route {
+        route.attributes.iter().for_each(|nla| {
+            if let rtnetlink::packet_route::route::RouteAttribute::Oif(index) = nla {
+                log::debug!("proxy route output interface index: {index}");
+                if *index == tun_interface_id {
+                    routing_loop = true;
+                }
+            }
+        });
+        if routing_loop {
+            return Err(std::io::Error::other("routing loop detected".to_string()).into());
+        }
+    } else {
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("route to proxy {proxy_cidr} not found")).into());
+    }
+    Ok(())
+}
+
+pub(crate) async fn _tproxy_setup_inner(tproxy_args: &TproxyArgs, state: &mut TproxyStateInner) -> Result<()> {
     let tun_name = &tproxy_args.tun_name;
 
-    let mut state: TproxyStateInner = TproxyStateInner {
-        tproxy_args: Some(tproxy_args.clone()),
-        ..Default::default()
-    };
+    let proxy_cidr = IpCidr::new_host(tproxy_args.proxy_addr.ip());
 
     flush_dns_cache()?;
 
     // check for gateway mode
     if tproxy_args.gateway_mode {
-        setup_gateway_mode(&mut state, tun_name)?;
+        setup_gateway_mode(state, tun_name)?;
     }
 
     // check for socket fwmark
     if tproxy_args.socket_fwmark.is_some() {
-        setup_fwmark_table(&mut state, tproxy_args).await?;
+        setup_fwmark_table(state, tproxy_args).await?;
     }
 
     // sudo ip link set tun0 up
     ip_link_set_up(tun_name).await?;
 
     for ip in tproxy_args.bypass_ips.iter() {
-        do_bypass_ip(&mut state, ip).await?;
+        do_bypass_ip(state, ip).await?;
     }
 
-    if tproxy_args.bypass_ips.is_empty() && !crate::is_private_ip(tproxy_args.proxy_addr.ip()) {
-        let cidr = IpCidr::new_host(tproxy_args.proxy_addr.ip());
-        do_bypass_ip(&mut state, &cidr).await?;
+    if tproxy_args.bypass_ips.is_empty() {
+        do_bypass_ip(state, &proxy_cidr).await?;
     }
 
     if tproxy_args.ipv4_default_route {
-        if !route_exists(&IPV4_DEFAULT_ROUTE, ROUTING_TABLE_MAIN).await? {
+        if !route_exists(&IPV4_DEFAULT_ROUTE, ROUTING_TABLE_MAIN, true).await? {
             state
                 .remove_routes
                 .push(ip_route_add(&IPV4_DEFAULT_ROUTE, tun_name, ROUTING_TABLE_MAIN).await?);
@@ -580,7 +615,7 @@ pub(crate) async fn _tproxy_setup(tproxy_args: &TproxyArgs) -> Result<TproxyStat
     } else {
         // If IPv4 is not enabled, we do not want IPv4 traffic to bypass the proxy if a route
         // already exists.
-        let default_route = ip_route_get(&IPV4_DEFAULT_ROUTE, ROUTING_TABLE_MAIN).await?;
+        let default_route = ip_route_get(&IPV4_DEFAULT_ROUTE, ROUTING_TABLE_MAIN, true).await?;
 
         if let Some(msg) = default_route {
             ip_route_del_msg(&msg).await?;
@@ -591,7 +626,7 @@ pub(crate) async fn _tproxy_setup(tproxy_args: &TproxyArgs) -> Result<TproxyStat
     }
 
     if tproxy_args.ipv6_default_route {
-        if !route_exists(&IPV6_DEFAULT_ROUTE, ROUTING_TABLE_MAIN).await? {
+        if !route_exists(&IPV6_DEFAULT_ROUTE, ROUTING_TABLE_MAIN, true).await? {
             state
                 .remove_routes
                 .push(ip_route_add(&IPV6_DEFAULT_ROUTE, tun_name, ROUTING_TABLE_MAIN).await?);
@@ -606,7 +641,7 @@ pub(crate) async fn _tproxy_setup(tproxy_args: &TproxyArgs) -> Result<TproxyStat
     } else {
         // If IPv6 is not enabled, we do not want IPv6 traffic to bypass the proxy if a route
         // already exists.
-        let default_route = ip_route_get(&IPV6_DEFAULT_ROUTE, ROUTING_TABLE_MAIN).await?;
+        let default_route = ip_route_get(&IPV6_DEFAULT_ROUTE, ROUTING_TABLE_MAIN, true).await?;
 
         if let Some(msg) = default_route {
             ip_route_del_msg(&msg).await?;
@@ -616,8 +651,26 @@ pub(crate) async fn _tproxy_setup(tproxy_args: &TproxyArgs) -> Result<TproxyStat
         }
     }
 
-    setup_resolv_conf(&mut state)?;
+    setup_resolv_conf(state)?;
 
+    detect_routing_loop(&proxy_cidr, tun_name).await?;
+
+    Ok(())
+}
+
+pub(crate) async fn _tproxy_setup(tproxy_args: &TproxyArgs) -> Result<TproxyStateInner> {
+    let mut state: TproxyStateInner = TproxyStateInner {
+        tproxy_args: Some(tproxy_args.clone()),
+        ..Default::default()
+    };
+    let result = _tproxy_setup_inner(tproxy_args, &mut state).await;
+    if result.is_err() {
+        let remove_result = _tproxy_remove(&mut state).await;
+        if let Err(remove_result) = &remove_result {
+            log::error!("tproxy removal failed: {remove_result}");
+        }
+        result?;
+    }
     Ok(state)
 }
 
