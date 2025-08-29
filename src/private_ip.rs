@@ -1,10 +1,10 @@
 use regex::Regex;
 
 pub fn is_private_ip(ip: std::net::IpAddr) -> bool {
-    if let std::net::IpAddr::V4(addr) = ip {
-        if ip_v4_is_private(&addr) {
-            return true;
-        }
+    if let std::net::IpAddr::V4(addr) = ip
+        && ip_v4_is_private(&addr)
+    {
+        return true;
     }
 
     let patterns = [
