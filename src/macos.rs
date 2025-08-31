@@ -321,7 +321,9 @@ pub(crate) fn flush_dns_cache() -> std::io::Result<()> {
     if crate::compare_version(&ver, "10.12") >= 0 {
         // MacOS version 10.12 and later
         // Command: `sudo killall -HUP mDNSResponder`
-        run_command("killall", &["-HUP", "mDNSResponder"])?;
+        if let Err(e) = run_command("killall", &["-HUP", "mDNSResponder"]) {
+            log::debug!("Failed to flush DNS cache: {e}");
+        }
     } else {
         // to make the code simpler, we do nothing for MacOS version 10.11 and earlier
     }
