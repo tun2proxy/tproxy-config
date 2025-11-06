@@ -17,7 +17,7 @@ unsafe-state-file = []
 [dependencies]
 cidr = { version = "0.3", features = ["serde"] }
 futures = "0.3.31"
-libloading = "0.8"
+libloading = "0.9"
 log = { version = "0.4" }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
