@@ -189,7 +189,9 @@ where
 ///
 /// Get the gatway IP, name, service ID, friendly name of the default interface.
 pub(crate) fn get_default_iface_params() -> std::io::Result<(IpAddr, String, String, Option<String>)> {
-    let store = SCDynamicStoreBuilder::new("tproxy-config get iface params").build();
+    let store = SCDynamicStoreBuilder::new("tproxy-config get iface params")
+        .build()
+        .ok_or(std::io::Error::other("Create SC DynamicStore failed"))?;
     let Some(property_list) = store.get("State:/Network/Global/IPv4") else {
         return Err(std::io::Error::other("Failed to get network state"));
     };
@@ -229,7 +231,9 @@ fn configure_dns_servers(iface_friendly_name: &str, service_id: &str, dns_server
     if dns_servers.is_empty() {
         return Ok(());
     }
-    let store = SCDynamicStoreBuilder::new("tproxy-config configure dns").build();
+    let store = SCDynamicStoreBuilder::new("tproxy-config configure dns")
+        .build()
+        .ok_or(std::io::Error::other("Create SC DynamicStore failed"))?;
     let mut dns_server_vec = Vec::<CFString>::new();
     dns_servers.iter().for_each(|x| dns_server_vec.push(x.to_string().as_str().into()));
     let dns_server_array = CFArray::from_CFTypes(dns_server_vec.as_slice());
@@ -256,7 +260,9 @@ fn configure_dns_servers(iface_friendly_name: &str, service_id: &str, dns_server
 /// If the DNS servers are obtained through DHCP, this function will return None.
 /// Overridden DNS servers are returned as a vector.
 fn get_dns_servers(service_id: &String) -> std::io::Result<Option<Vec<IpAddr>>> {
-    let store = SCDynamicStoreBuilder::new("tproxy-config get dns").build();
+    let store = SCDynamicStoreBuilder::new("tproxy-config get dns")
+        .build()
+        .ok_or(std::io::Error::other("Create SC DynamicStore failed"))?;
     let key: CFString = format!("State:/Network/Service/{service_id}/DNS").as_str().into();
 
     let Some(result) = store.get(key) else {

@@ -15,26 +15,26 @@ unsafe-state-file = []
 # default = ["unsafe-state-file"]
 
 [dependencies]
-cidr = { version = "0.3", features = ["serde"] }
+cidr = { version = "0.3.1", features = ["serde"] }
 futures = "0.3.31"
-libloading = "0.9"
-log = { version = "0.4" }
-regex = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["rt"] }
+libloading = "0.9.0"
+log = { version = "0.4.29" }
+regex = "1.12.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { version = "1.48.0", features = ["rt"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.30", features = ["fs", "mount", "process"] }
-rtnetlink = "0.19"
-tempfile = "3"
+nix = { version = "0.30.1", features = ["fs", "mount", "process"] }
+rtnetlink = "0.19.0"
+tempfile = "3.23.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-resolv-conf = "0.7"
-system-configuration = "0.6"
+resolv-conf = "0.7.6"
+system-configuration = "0.7.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = [
+windows-sys = { version = "0.61.2", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_SystemServices",
     "Win32_Security_Cryptography",

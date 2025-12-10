@@ -145,17 +145,21 @@ pub(crate) fn retrieve_intermediate_state() -> std::io::Result<TproxyStateInner>
 /// Returns 1 if v1 > v2, -1 if v1 < v2, 0 if v1 == v2
 #[allow(dead_code)]
 pub(crate) fn compare_version(v1: &str, v2: &str) -> i32 {
-    let n = v1.len().abs_diff(v2.len());
-    let split_parse = |ver: &str| -> Vec<i32> {
-        ver.split('.')
-            .filter_map(|s| s.parse::<i32>().ok())
-            .chain(std::iter::repeat_n(0, n))
-            .collect()
-    };
+    let split_parse = |ver: &str| -> Vec<i32> { ver.split('.').map(|s| s.parse::<i32>().unwrap_or(0)).collect() };
 
-    std::iter::zip(split_parse(v1), split_parse(v2))
-        .skip_while(|(a, b)| a == b)
-        .map(|(a, b)| if a > b { 1 } else { -1 })
-        .next()
-        .unwrap_or(0)
+    let mut v1_parts = split_parse(v1);
+    let mut v2_parts = split_parse(v2);
+
+    let max_len = v1_parts.len().max(v2_parts.len());
+    v1_parts.resize(max_len, 0);
+    v2_parts.resize(max_len, 0);
+
+    for (a, b) in v1_parts.iter().zip(v2_parts.iter()) {
+        match a.cmp(b) {
+            std::cmp::Ordering::Greater => return 1,
+            std::cmp::Ordering::Less => return -1,
+            std::cmp::Ordering::Equal => continue,
+        }
+    }
+    0
 }
