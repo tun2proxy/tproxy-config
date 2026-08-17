@@ -31,7 +31,7 @@ tempfile = "3.27.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 resolv-conf = "0.7.6"
-system-configuration = "0.7.0"
+system-configuration = "0.8.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61.2", features = [
