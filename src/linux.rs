@@ -316,7 +316,6 @@ fn write_buffer_to_fd(fd: std::os::fd::BorrowedFd<'_>, data: &[u8]) -> Result<()
 fn write_nameserver(fd: std::os::fd::BorrowedFd<'_>, tun_gateway: Option<IpAddr>) -> Result<()> {
     let tun_gateway = tun_gateway.unwrap_or_else(|| "198.18.0.1".parse().unwrap());
     let data = format!("nameserver {tun_gateway}\n");
-    nix::sys::stat::fchmod(fd.as_fd(), nix::sys::stat::Mode::from_bits(0o444).unwrap())?;
     write_buffer_to_fd(fd, data.as_bytes())?;
     Ok(())
 }
@@ -368,8 +367,21 @@ fn setup_resolv_conf(restore: &mut TproxyStateInner) -> Result<()> {
 
         restore.restore_resolvconf_content = Some(fs::read(ETC_RESOLV_CONF_FILE)?);
 
+        // Older versions chmod'ed /etc/resolv.conf to 0444 on this path, which made the
+        // write here fail with EACCES on every subsequent start in containers that
+        // drop CAP_DAC_OVERRIDE (e.g. Docker's bind-mounted resolv.conf). Restore
+        // writability before reopening.
+        let write_mode = nix::sys::stat::Mode::from_bits(0o644).unwrap();
         let flags = nix::fcntl::OFlag::O_WRONLY | nix::fcntl::OFlag::O_CLOEXEC | nix::fcntl::OFlag::O_TRUNC;
-        let fd = nix::fcntl::open(ETC_RESOLV_CONF_FILE, flags, nix::sys::stat::Mode::from_bits(0o644).unwrap())?;
+        let fd = match nix::fcntl::open(ETC_RESOLV_CONF_FILE, flags, write_mode) {
+            Ok(fd) => fd,
+            Err(nix::errno::Errno::EACCES) => {
+                // Recover from the 0444 mode left behind by older versions (see comment above).
+                fs::set_permissions(ETC_RESOLV_CONF_FILE, Permissions::from_mode(0o644))?;
+                nix::fcntl::open(ETC_RESOLV_CONF_FILE, flags, write_mode)?
+            }
+            Err(err) => return Err(err.into()),
+        };
         write_nameserver(fd.as_fd(), tun_gateway)?;
     }
     Ok(())
