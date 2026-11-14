@@ -17,16 +17,16 @@ unsafe-state-file = []
 [dependencies]
 cidr = { version = "0.3.2", features = ["serde"] }
 futures = "0.3.34"
-libloading = "0.9.0"
-log = { version = "0.4.34" }
-regex = "1.13.1"
+libloading = "0.9.1"
+log = { version = "0.4.35" }
+regex = "1.13.2"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-tokio = { version = "1.53.1", features = ["rt"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["rt"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.31.3", features = ["fs", "mount", "process"] }
-rtnetlink = "0.23.0"
+nix = { version = "0.32.0", features = ["fs", "mount", "process"] }
+rtnetlink = "0.24.0"
 tempfile = "3.27.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]

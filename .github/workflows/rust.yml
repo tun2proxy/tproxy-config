@@ -5,7 +5,7 @@ on:
   pull_request:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 3' # Every Wednesday at midnight UTC
+    - cron: "0 0 * * 3" # Every Wednesday at midnight UTC
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,28 +20,28 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-    - uses: actions/checkout@v7
-    - name: rustfmt
-      if: ${{ !cancelled() }}
-      run: cargo fmt --all -- --check
-    - name: check
-      if: ${{ !cancelled() }}
-      run: cargo check --verbose
-    - name: clippy
-      if: ${{ !cancelled() }}
-      run: cargo clippy --all-targets --all-features -- -D warnings
-    - name: Build
-      if: ${{ !cancelled() }}
-      run: |
+      - uses: actions/checkout@v7
+      - name: rustfmt
+        if: ${{ !cancelled() }}
+        run: cargo fmt --all -- --check
+      - name: check
+        if: ${{ !cancelled() }}
+        run: cargo check --verbose
+      - name: clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Build
+        if: ${{ !cancelled() }}
+        run: |
           cargo build --verbose --tests --no-default-features
           cargo clean
           cargo build --verbose --tests --all-features
-    - name: Test
-      if: ${{ !cancelled() }}
-      run: cargo test --verbose --tests --all-features
-    - name: Abort on error
-      if: ${{ failure() }}
-      run: echo "Some of jobs failed" && false
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: cargo test --verbose --tests --all-features
+      - name: Abort on error
+        if: ${{ failure() }}
+        run: echo "Some of jobs failed" && false
 
   semver:
     name: Check semver
