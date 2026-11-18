@@ -25,7 +25,7 @@ serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["rt"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.31.3", features = ["fs", "mount", "process"] }
+nix = { version = "0.32.0", features = ["fs", "mount", "process"] }
 rtnetlink = "0.24.0"
 tempfile = "3.27.0"
 
